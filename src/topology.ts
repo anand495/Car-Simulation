@@ -359,19 +359,39 @@ export function generateEntryPath(
   // Drive down entry road to lot
   path.push({ x: entryLaneX, y: entryPoint.y });
 
-  // Enter the lot
-  path.push({ x: entryLaneX, y: lot.y + lot.height - 10 });
-
   // Find the aisle for this spot
   const aisle = topology.aisles.find((a) => a.id === spot.aisleId)!;
 
-  // Navigate to the aisle - drive along the right side corridor
-  const corridorX = lot.x + lot.width - 15;
-  path.push({ x: corridorX, y: lot.y + lot.height - 10 });
-  path.push({ x: corridorX, y: aisle.y });
+  // Direct path approach: minimize travel distance while staying on drivable paths
+  //
+  // Strategy: Use different entry points to the vertical corridor based on
+  // which aisle the car is going to. This spreads traffic across the lot
+  // and reduces the chance of one blocked car stopping all traffic.
+  //
+  // - For spots closer to the entry (near top), enter corridor early
+  // - For spots further from entry (near bottom), travel horizontally first
+  //   then use a more direct diagonal approach to the aisle
 
-  // Turn into the aisle and go to spot's x position
-  path.push({ x: spot.x, y: aisle.y });
+  const rightCorridorX = lot.x + lot.width - 15; // Right side corridor
+
+  // Calculate an x-position that's between the spot and the right corridor
+  // This creates slightly different paths for different spots
+  const approachX = Math.min(spot.x + 30, rightCorridorX);
+
+  // Step 1: Enter the lot from entry road
+  path.push({ x: entryLaneX, y: lot.y + lot.height - 10 });
+
+  // Step 2: Move toward an approach point above the target aisle
+  // Using spot.x influence means cars heading to different spots diverge here
+  path.push({ x: approachX, y: lot.y + lot.height - 10 });
+
+  // Step 3: Go down to the aisle level via the approach corridor
+  path.push({ x: approachX, y: aisle.y });
+
+  // Step 4: Travel through aisle to the spot's x position (if needed)
+  if (Math.abs(approachX - spot.x) > 5) {
+    path.push({ x: spot.x, y: aisle.y });
+  }
 
   // Pull into the spot
   path.push({ x: spot.x, y: spot.y });

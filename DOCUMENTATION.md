@@ -399,10 +399,12 @@ Waypoints are stored as `path: Point[]` on each vehicle, generated at spawn time
 1. Start on main road in spawn lane (y controlled by lane logic, not path)
 2. Drive west to entry road x-position (must be in lane 0 by this point)
 3. Turn south onto entry road (randomly assigned to left or right lane)
-4. Enter lot
-5. Navigate to right corridor
-6. Drive down to target aisle
-7. Turn into aisle
+4. Enter lot (top of lot area)
+5. Move to approach point: `approachX = min(spot.x + 30, rightCorridorX)`
+   - This creates different vertical paths for different spots
+   - Spreads traffic instead of funneling through single corridor
+6. Drive down to target aisle level
+7. Turn into aisle at spot's x position
 8. Pull into spot
 
 **Exit Path** (`generateExitPath(topology, spot)`):
@@ -668,6 +670,30 @@ Vehicles on the main road can change lanes to reach the entry road.
 - **Path structure**: `[spawn, entry road x on main road, below main road, ...]`
   - Index 0-1: Main road waypoints (handled by lane logic, not path following)
   - Index 2+: Entry road and lot waypoints (handled by normal path following)
+
+### Version 2.7 - Direct Path Routing (Traffic Distribution)
+- Fixed traffic bottleneck where all cars used the same vertical corridor path
+
+- **Problem observed**: When cars entered the lot to park:
+  1. All cars traveled to the same corridor point (`corridorX = lot.x + lot.width - 15`)
+  2. All cars then traveled down the same vertical corridor
+  3. When one car stopped (to pull into a spot), all cars behind got blocked
+  4. This created a cascading traffic jam
+
+- **Root cause**: The `generateEntryPath()` function used a single hardcoded corridor x-position
+  for all vehicles, regardless of where their destination spot was located
+
+- **Reason for fix**: In the real world, drivers minimize travel distance by choosing the most
+  direct drivable path to their parking spot. They don't all follow the same lane when there's
+  open pavement available. A driver going to a spot on the left side of the lot would naturally
+  drive more toward the left, while a driver going to a spot on the right would stay right.
+
+- **Solution**: Direct path routing that minimizes travel distance while staying on drivable paths
+  - `approachX = min(spot.x + 30, rightCorridorX)` - creates unique approach point per spot
+  - Cars heading to spots on the left travel further left before going down
+  - Cars heading to spots on the right stay near the right corridor
+  - This spreads traffic across the lot width instead of single corridor
+  - When one car stops, cars with different destinations can pass on different paths
 
 ---
 
