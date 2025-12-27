@@ -828,7 +828,7 @@ Cars must be in lane 0 (bottom/south) to turn into the entry road.
 4. Complete: Snap to target lane y-position
 
 **Urgency Slowdown:**
-- If lane change needed but blocked, and within 200m of entry:
+- If lane change needed but blocked, and within 20% of main road length of entry:
 - Speed reduced by 40% to find a gap
 
 **Missed Turn Handling:**
@@ -1079,7 +1079,7 @@ This section organizes all behaviors by where they apply, demonstrating the cont
 | Lane-locked driving | Always | Y-position snapped to lane center |
 | Lane changing | Need lane 0, within 600m of entry | Smooth ease-in-out interpolation |
 | Cooperative yielding | Another car changing into our lane | Slow down to maintain gap |
-| Urgency slowdown | Can't change lanes, within 200m | Reduce speed by 40% |
+| Urgency slowdown | Can't change lanes, within 20% of road length | Reduce speed by 40% |
 | Turn point detection | At entry x-position AND in lane 0 | Face south, advance pathIndex |
 | Missed turn handling | Passed entry by 50m in wrong lane | Mark EXITED, respawn replacement |
 
@@ -1095,6 +1095,8 @@ This section organizes all behaviors by where they apply, demonstrating the cont
 | Obstacle avoidance | Parked car ahead, in aisle | Steer up to 15° around obstacle |
 | Boundary checking | Before any steering | Project position, reject if leaves aisle |
 | Parked car collision | Moving car hits parked car | Moving car stops (speed = 0) |
+| Aisle yielding | Higher priority vehicle nearby | Yield based on exit priority |
+| Yield to backing vehicles | Vehicle in EXITING_SPOT state within 10m | Treat as blocking |
 | Waypoint following | Not reversing | Turn toward waypoint, move forward |
 | Reversing | EXITING_SPOT state | Move backward without turning |
 | Direct spot approach | PARKING state, path exhausted | Turn toward spot, move forward |
@@ -1116,8 +1118,11 @@ This section organizes all behaviors by where they apply, demonstrating the cont
 | Behavior | Condition | Implementation |
 |----------|-----------|----------------|
 | Speed limiting | Always | min(state, topology, density, gap) |
-| Collision resolution | Any two cars overlap | Priority-based stopping + nudge apart |
+| Collision resolution | Any two cars overlap | Priority-based stopping + lane-constrained nudge |
+| Head-on conflict | Vehicles facing each other | Wait time used as priority tiebreaker |
 | Wait time tracking | Speed < 0.1 m/s | Increment counter, visual feedback |
+| Stuck resolution | waitTime > 5s | Tiered escalation: creep (10s) → aggressive (15s) → skip waypoint (20s) |
+| Priority-based creep | Multiple stuck vehicles | Only highest priority vehicle allowed to creep |
 | Gap-based speed | Car ahead | IDM-style following distance |
 | Movement validation | Before any position update | Check `isWithinPavedArea()`, reject if off-road |
 | Off-road recovery | Position outside paved area | Find nearest paved point, navigate back slowly |
@@ -1493,6 +1498,110 @@ This pattern ensures:
 
 ---
 
+### Version 3.2 - Stuck/Yield Resolution & Metrics Dashboard
+
+- Added comprehensive stuck vehicle resolution and priority-based collision handling
+
+- **Stuck Vehicle Resolution (Timeout-Based Escalation)**:
+  - Level 1 (5-10s): Minor steering adjustments to find alternate path
+  - Level 2 (10-15s): Allow slow creep movement (0.3× creep speed) even when blocked
+  - Level 3 (15-20s): More aggressive creep (0.5× creep speed)
+  - Level 4 (20s+): Skip current waypoint as last resort
+
+- **Priority-Based Creep Resolution**:
+  - Only the highest-priority stuck vehicle is allowed to creep
+  - Prevents convoy deadlock where multiple stuck vehicles try to move simultaneously
+  - Uses `getExitPriority()` to determine which vehicle has precedence
+
+- **Expanded Priority System**:
+  - Extended `getExitPriority()` to include all vehicle states, not just exiting:
+    - ON_ROAD: 100 + x-position
+    - MERGING: 90
+    - AT_MERGE_POINT: 80
+    - IN_EXIT_LANE: 70 + y-position
+    - DRIVING_TO_EXIT: 60 + y-position
+    - EXITING_SPOT: 50
+    - PARKING: 40 - y * 0.1 (deeper in lot = more progress)
+    - NAVIGATING_TO_SPOT: 30 - y * 0.1
+    - ENTERING: 20 - y * 0.1
+    - APPROACHING: 10 + time since spawn * 0.5
+
+- **Head-On Conflict Detection**:
+  - Detects vehicles facing each other (heading difference ≈ π)
+  - Uses dot products to verify both vehicles are actually facing toward each other
+  - In head-on conflicts, wait time serves as priority tiebreaker (longer wait = higher priority)
+
+- **Entry Road/Lot Junction Collision Detection**:
+  - Added `entryToLot` check to detect conflicts between vehicles on entry road and in lot
+  - Ensures vehicles transitioning from entry road to lot are properly detected for collision
+
+- **Metrics Dashboard**:
+  - Added comprehensive vehicle state breakdown in top-right corner
+  - Shows counts for: Spawned, Parked, Exited, In Transit, In Lot, Exiting, On Road, Stuck
+  - "Stuck" defined as waitTime > 5s and not parked
+
+---
+
+### Version 3.3 - Topology-Agnostic Refactoring
+
+- Refactored all magic number thresholds to use proportional values based on topology dimensions
+
+- **Design Principle**: Vehicle behavior should depend only on:
+  1. Vehicle state (position, heading, speed, waitTime)
+  2. Relative distances to other vehicles
+  3. Topology-provided properties (road width, dimensions)
+  - NOT on hardcoded coordinate values that assume a specific layout
+
+- **Refactored Distance Thresholds**:
+  | Original | Refactored | Rationale |
+  |----------|------------|-----------|
+  | `entryRoad.x ± 10` | `entryRoad.x ± entryRoad.width` | Entry zone proportional to road width |
+  | `distToEntry > -20 && < 50` | `distToEntry > -passDistance && < approachDistance` | Approach/pass zones = 3×/2× entry road width |
+  | `dist < 15` for blocking | `dist < CAR_LENGTH * 3` | Distance relative to vehicle size |
+  | `exitRoad.width + 10` | `exitRoad.width * 2` | Exit zone proportional to road width |
+  | `dist < 20` for merge yield | `dist < CAR_LENGTH * 4` | Distance relative to vehicle size |
+  | `distToEntry < 200` for urgency | `distToEntry < mainRoad.length * 0.2` | Urgency zone = 20% of road length |
+
+- **Why Topology-Agnostic Matters**:
+  - Same simulation code works with any lot layout
+  - Behavior scales appropriately with different road dimensions
+  - Easier to create new topologies without modifying behavior code
+  - Reduces coupling between topology definition and vehicle logic
+
+- **What Remains Topology-Dependent (Legitimately)**:
+  - Reading topology structure (`this.topology.entryRoad.x`)
+  - Computing positions from topology (`getLaneY(mainRoad, lane)`)
+  - Checking paved area bounds (`isWithinPavedArea()`)
+  - These are necessary queries, not hardcoded assumptions
+
+---
+
+### Version 3.4 - Lane-Constrained Collision Resolution
+
+- Fixed collision nudging to prevent vehicles from being pushed off their lanes
+
+- **Problem**: When vehicles collided, the nudge-apart logic could push them perpendicular to the road, causing them to leave their lane or even go off-road.
+
+- **Solution**: Constrain nudge direction based on vehicle location (topology-agnostic):
+  | Location | Allowed Nudge | Rationale |
+  |----------|---------------|-----------|
+  | `ON_MAIN_ROAD` (both vehicles) | X-axis only | Main road runs east-west |
+  | `ON_ENTRY_ROAD` / `ON_EXIT_ROAD` (both) | Y-axis only | These roads run north-south |
+  | Junction (mixed locations) | 30% magnitude | Conservative nudging at intersections |
+  | `IN_LOT` | Both axes | Vehicles can be at any angle in lot |
+
+- **Why This Is Topology-Agnostic**:
+  - Uses `vehicle.location` state, not hardcoded coordinates
+  - Road orientation is implicit in location type (main = horizontal, entry/exit = vertical)
+  - Same logic works for any topology that follows the standard road naming convention
+
+- **Disciplined Driving Behavior**:
+  - Real vehicles don't phase through each other or get pushed sideways
+  - Priority-based stopping handles who yields
+  - Nudging only corrects minor overlaps along the natural travel direction
+
+---
+
 ## Known Limitations
 
 1. Single-file movement in aisles (no passing)
@@ -1509,8 +1618,12 @@ This pattern ensures:
 - [x] Traffic light infrastructure (implemented v2.1)
 - [x] Unified traffic model - all vehicles follow same rules (implemented v3.0)
 - [x] Disciplined yielding at intersections (implemented v3.1)
+- [x] Stuck vehicle resolution with tiered escalation (implemented v3.2)
+- [x] Priority-based collision resolution (implemented v3.2)
+- [x] Metrics dashboard (implemented v3.2)
+- [x] Topology-agnostic refactoring (implemented v3.3)
+- [x] Lane-constrained collision resolution (implemented v3.4)
 - [ ] Activate traffic light simulation loop
-- [ ] Proper collision avoidance (not just detection)
 - [ ] Different vehicle types/sizes
 - [ ] Pedestrian simulation
 - [ ] Time-based demand patterns

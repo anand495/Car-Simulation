@@ -225,34 +225,121 @@ function drawVehicle(
 function drawStats(
   ctx: CanvasRenderingContext2D,
   sim: Simulation,
-  fps: number
+  fps: number,
+  canvas: HTMLCanvasElement
 ): void {
   const state = sim.state;
 
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-  ctx.fillRect(10, 10, 200, 180);
+  // Count vehicles by state for detailed breakdown
+  const stateCounts: Record<string, number> = {
+    approaching: 0,
+    entering: 0,
+    navigating: 0,
+    parking: 0,
+    parked: 0,
+    exiting_spot: 0,
+    driving_to_exit: 0,
+    in_exit_lane: 0,
+    at_merge: 0,
+    merging: 0,
+    on_road: 0,
+    stuck: 0, // waitTime > 5s
+  };
+
+  for (const v of state.vehicles) {
+    if (v.state === 'APPROACHING') stateCounts.approaching++;
+    else if (v.state === 'ENTERING') stateCounts.entering++;
+    else if (v.state === 'NAVIGATING_TO_SPOT') stateCounts.navigating++;
+    else if (v.state === 'PARKING') stateCounts.parking++;
+    else if (v.state === 'PARKED') stateCounts.parked++;
+    else if (v.state === 'EXITING_SPOT') stateCounts.exiting_spot++;
+    else if (v.state === 'DRIVING_TO_EXIT') stateCounts.driving_to_exit++;
+    else if (v.state === 'IN_EXIT_LANE') stateCounts.in_exit_lane++;
+    else if (v.state === 'AT_MERGE_POINT') stateCounts.at_merge++;
+    else if (v.state === 'MERGING') stateCounts.merging++;
+    else if (v.state === 'ON_ROAD') stateCounts.on_road++;
+
+    if (v.waitTime > 5 && v.state !== 'PARKED') stateCounts.stuck++;
+  }
+
+  // Calculate in-lot vehicles (navigating + parking)
+  const inLot = stateCounts.navigating + stateCounts.parking;
+  const inTransit = stateCounts.approaching + stateCounts.entering;
+  const exitingLot = stateCounts.exiting_spot + stateCounts.driving_to_exit +
+                     stateCounts.in_exit_lane + stateCounts.at_merge + stateCounts.merging;
+
+  // Draw panel in TOP-RIGHT corner (more visible)
+  const panelWidth = 220;
+  const panelHeight = 240;
+  const panelX = canvas.width - panelWidth - 10;
+  const panelY = 10;
+
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+  ctx.fillRect(panelX, panelY, panelWidth, panelHeight);
+  ctx.strokeStyle = '#444';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(panelX, panelY, panelWidth, panelHeight);
 
   ctx.fillStyle = '#ffffff';
-  ctx.font = '14px monospace';
+  ctx.font = 'bold 14px monospace';
+  ctx.fillText('SIMULATION METRICS', panelX + 10, panelY + 20);
 
-  const lines = [
-    `Time: ${state.time.toFixed(1)}s`,
-    `Phase: ${state.phase}`,
-    `FPS: ${fps.toFixed(0)}`,
-    ``,
-    `Spawned: ${state.totalSpawned}`,
-    `Parked: ${state.parkedCount}`,
-    `Exited: ${state.exitedCount}`,
-    ``,
-    `Throughput: ${state.throughput}/min`,
-    state.avgExitTime !== null
-      ? `Avg Exit: ${state.avgExitTime.toFixed(1)}s`
-      : `Avg Exit: --`,
-  ];
+  ctx.font = '12px monospace';
+  let y = panelY + 40;
+  const lineHeight = 16;
 
-  lines.forEach((line, i) => {
-    ctx.fillText(line, 20, 30 + i * 16);
-  });
+  // Time and phase
+  ctx.fillStyle = '#888';
+  ctx.fillText(`Time: ${state.time.toFixed(1)}s | FPS: ${fps.toFixed(0)}`, panelX + 10, y);
+  y += lineHeight;
+  ctx.fillStyle = state.phase === 'FILLING' ? '#4ade80' : state.phase === 'EXODUS' ? '#f97316' : '#fff';
+  ctx.fillText(`Phase: ${state.phase}`, panelX + 10, y);
+  y += lineHeight + 5;
+
+  // Main counts with colors
+  ctx.fillStyle = '#4ade80';
+  ctx.fillText(`Spawned: ${state.totalSpawned}`, panelX + 10, y);
+  y += lineHeight;
+  ctx.fillStyle = '#22d3ee';
+  ctx.fillText(`Parked:  ${state.parkedCount}`, panelX + 10, y);
+  y += lineHeight;
+  ctx.fillStyle = '#a78bfa';
+  ctx.fillText(`Exited:  ${state.exitedCount}`, panelX + 10, y);
+  y += lineHeight + 5;
+
+  // Vehicle breakdown
+  ctx.fillStyle = '#888';
+  ctx.fillText('--- Vehicle Status ---', panelX + 10, y);
+  y += lineHeight;
+  ctx.fillStyle = '#f59e0b';
+  ctx.fillText(`In Transit: ${inTransit}`, panelX + 10, y);
+  ctx.fillText(`(app:${stateCounts.approaching} ent:${stateCounts.entering})`, panelX + 100, y);
+  y += lineHeight;
+  ctx.fillStyle = '#10b981';
+  ctx.fillText(`In Lot:     ${inLot}`, panelX + 10, y);
+  ctx.fillText(`(nav:${stateCounts.navigating} park:${stateCounts.parking})`, panelX + 100, y);
+  y += lineHeight;
+  ctx.fillStyle = '#f97316';
+  ctx.fillText(`Exiting:    ${exitingLot}`, panelX + 10, y);
+  y += lineHeight;
+  ctx.fillStyle = '#3b82f6';
+  ctx.fillText(`On Road:    ${stateCounts.on_road}`, panelX + 10, y);
+  y += lineHeight;
+
+  // Stuck vehicles (highlighted in red if any)
+  if (stateCounts.stuck > 0) {
+    ctx.fillStyle = '#ef4444';
+    ctx.font = 'bold 12px monospace';
+  } else {
+    ctx.fillStyle = '#22c55e';
+  }
+  ctx.fillText(`Stuck (>5s): ${stateCounts.stuck}`, panelX + 10, y);
+  ctx.font = '12px monospace';
+  y += lineHeight + 5;
+
+  // Throughput
+  ctx.fillStyle = '#888';
+  ctx.fillText(`Throughput: ${state.throughput}/min`, panelX + 10, y);
 }
 
 function render(
@@ -277,7 +364,7 @@ function render(
   }
 
   // Draw stats overlay
-  drawStats(ctx, sim, fps);
+  drawStats(ctx, sim, fps, canvas);
 }
 
 // ============================================================================
