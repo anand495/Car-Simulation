@@ -1078,9 +1078,11 @@ This section organizes all behaviors by where they apply, demonstrating the cont
 |----------|-----------|----------------|
 | Lane-locked driving | Always | Y-position snapped to lane center |
 | Lane changing | Need lane 0, within 600m of entry | Smooth ease-in-out interpolation |
+| Lane change slowdown | Changing lanes near entry (within 3× road width) | Cap speed to AISLE (4.5 m/s) |
 | Cooperative yielding | Another car changing into our lane | Slow down to maintain gap |
 | Urgency slowdown | Can't change lanes, within 20% of road length | Reduce speed by 40% |
 | Turn point detection | At entry x-position AND in lane 0 | Face south, advance pathIndex |
+| Extended turn zone | Up to 1 road width past entry center | Still allow turn if slightly late |
 | Missed turn handling | Passed entry by 50m in wrong lane | Mark EXITED, respawn replacement |
 
 **`ON_ENTRY_ROAD` Behaviors:**
@@ -1599,6 +1601,30 @@ This pattern ensures:
   - Real vehicles don't phase through each other or get pushed sideways
   - Priority-based stopping handles who yields
   - Nudging only corrects minor overlaps along the natural travel direction
+
+- **Dynamic Spawn Rate**:
+  - Spawn interval adjusts based on traffic congestion
+  - Base interval: 0.5 seconds
+  - Formula: `dynamicInterval = 0.5s × (1 + floor(vehiclesInTransit / 10) × 0.5)`
+  - At 10+ vehicles in transit: interval doubles to 1.0s
+  - At 20+ vehicles in transit: interval triples to 1.5s
+  - Prevents overwhelming the system during high traffic
+
+- **Exit Count Accuracy**:
+  - `exitedCount` only counts vehicles that actually parked and then exited
+  - Filters by `intent === 'EXITING_LOT'`
+  - Excludes pass-through traffic (never entered lot)
+  - Excludes missed-turn vehicles (never parked)
+
+- **Extended Turn Zone**:
+  - Vehicles can turn into entry road even if slightly past the entry point
+  - Zone extends from `entryRoadLeft - entryRoad.width` to `entryRoadRight + 5`
+  - Accommodates vehicles that completed lane change slightly late
+
+- **Lane Change Slowdown Near Entry**:
+  - Vehicles slow down during lane change when near the entry point
+  - Condition: `distToEntry < entryRoad.width * 3 && distToEntry > -entryRoad.width`
+  - Speed capped to `SPEEDS.AISLE` (4.5 m/s) to complete lane change in time
 
 ---
 
