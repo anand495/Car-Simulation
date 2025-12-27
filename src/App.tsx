@@ -491,6 +491,33 @@ export default function App() {
     }
   }, []);
 
+  const handleExportLog = useCallback(() => {
+    if (simRef.current) {
+      const logJson = simRef.current.exportLog();
+      const blob = new Blob([logJson], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `simulation-log-${new Date().toISOString().slice(0, 19)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+
+      // Also log summary to console
+      const summary = simRef.current.getLogSummary();
+      console.log('=== Simulation Log Summary ===');
+      console.log(`Duration: ${summary.duration.toFixed(1)}s`);
+      console.log(`Vehicles: ${summary.vehicleCount}`);
+      console.log(`Snapshots: ${summary.totalSnapshots}`);
+      console.log(`Events: ${summary.totalEvents}`);
+      if (summary.stuckVehicles.length > 0) {
+        console.log('Stuck vehicles (wait > 5s):');
+        summary.stuckVehicles.forEach(v => {
+          console.log(`  - Vehicle ${v.id}: ${v.maxWaitTime.toFixed(1)}s stuck in ${v.lastState}`);
+        });
+      }
+    }
+  }, []);
+
   const handlePauseToggle = useCallback(() => {
     setIsPaused((p) => !p);
   }, []);
@@ -546,6 +573,9 @@ export default function App() {
           </button>
           <button onClick={handleReset} style={styles.buttonRed}>
             Reset
+          </button>
+          <button onClick={handleExportLog} style={styles.buttonBlue}>
+            Export Log
           </button>
         </div>
 
@@ -647,6 +677,16 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: '4px',
     cursor: 'pointer',
     backgroundColor: '#ef4444',
+    color: '#fff',
+  },
+  buttonBlue: {
+    padding: '10px 20px',
+    fontSize: '14px',
+    fontWeight: 'bold',
+    border: 'none',
+    borderRadius: '4px',
+    cursor: 'pointer',
+    backgroundColor: '#3b82f6',
     color: '#fff',
   },
   statsPanel: {

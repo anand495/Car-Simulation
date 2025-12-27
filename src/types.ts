@@ -347,6 +347,8 @@ export interface SimConfig {
   roadTrafficRate: number;    // vehicles per minute on main road
   staggerExitSeconds: number; // spread exodus start over this many seconds
   showDebug: boolean;
+  enableLogging: boolean;     // capture vehicle state history
+  logInterval: number;        // seconds between log captures (0 = every frame)
 }
 
 export const DEFAULT_CONFIG: SimConfig = {
@@ -354,7 +356,66 @@ export const DEFAULT_CONFIG: SimConfig = {
   roadTrafficRate: 30,
   staggerExitSeconds: 60,
   showDebug: false,
+  enableLogging: true,
+  logInterval: 0.5,           // capture every 0.5 seconds
 };
+
+// ----------------------------------------------------------------------------
+// SIMULATION LOGGING (for debugging)
+// ----------------------------------------------------------------------------
+
+/** Snapshot of a single vehicle at a point in time */
+export interface VehicleSnapshot {
+  id: number;
+  timestamp: number;
+
+  // Position
+  x: number;
+  y: number;
+  heading: number;
+
+  // Kinematics
+  speed: number;
+  targetSpeed: number;
+
+  // State
+  state: VehicleState;
+  location: LocationState;
+  intent: IntentState;
+
+  // Behaviors
+  isChangingLane: boolean;
+  isReversing: boolean;
+  isMerging: boolean;
+  isWaitingToMerge: boolean;
+
+  // Lane info
+  currentLane: number | null;
+  targetLane: number | null;
+
+  // Navigation
+  targetSpotId: number | null;
+  pathIndex: number;
+  pathLength: number;
+
+  // Timing
+  waitTime: number;
+}
+
+/** Complete simulation log */
+export interface SimulationLog {
+  startTime: Date;
+  snapshots: VehicleSnapshot[];
+  events: SimulationEvent[];
+}
+
+/** Discrete events that occur during simulation */
+export interface SimulationEvent {
+  timestamp: number;
+  vehicleId: number;
+  type: 'SPAWN' | 'PARKED' | 'EXIT_START' | 'EXITED' | 'LANE_CHANGE_START' | 'LANE_CHANGE_END' | 'STUCK';
+  details?: Record<string, unknown>;
+}
 
 // ----------------------------------------------------------------------------
 // COLORS (for visualization)
