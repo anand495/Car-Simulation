@@ -1,6 +1,12 @@
 // ============================================================================
 // PARKING FLOW SIMULATION - TYPE DEFINITIONS
 // ============================================================================
+// Architecture: Layered State Model
+// - Layer 1: LocationState (where am I physically?)
+// - Layer 2: IntentState (what is my goal?)
+// - Layer 3: BehaviorFlags (what micro-behaviors are active?)
+// - Layer 4: TrafficControlState (traffic light/sign awareness)
+// ============================================================================
 
 // ----------------------------------------------------------------------------
 // REALISTIC DIMENSIONS (meters)
@@ -23,6 +29,7 @@ export const SPEEDS = {
   MAIN_ROAD: 13.4,       // 30 mph - on main road
   BACKUP: 1.0,           // 2 mph - reversing out of spot
   CREEP: 0.5,            // 1 mph - inching forward in queue
+  LANE_CHANGE: 8.9,      // 20 mph - during lane change (maintain reasonable speed)
 } as const;
 
 // ----------------------------------------------------------------------------
@@ -36,6 +43,11 @@ export const PHYSICS = {
   MIN_GAP: 2.0,               // meters - minimum gap to car ahead
   JAM_DENSITY: 0.15,          // vehicles per m² at full jam
   CRITICAL_DENSITY: 0.08,     // vehicles per m² at max flow
+  // Lane change parameters
+  LANE_CHANGE_MIN_GAP: 8.0,   // meters - min gap needed to change lanes
+  LANE_CHANGE_TIME: 2.0,      // seconds - time to complete lane change
+  LANE_CHANGE_LOOK_AHEAD: 50, // meters - how far ahead to check for lane change need
+  LANE_CHANGE_LOOK_BEHIND: 30,// meters - how far behind to check for safety
 } as const;
 
 // ----------------------------------------------------------------------------
@@ -59,9 +71,74 @@ export interface Rectangle {
   rotation: number; // radians
 }
 
-// ----------------------------------------------------------------------------
-// VEHICLE STATES
-// ----------------------------------------------------------------------------
+// ============================================================================
+// LAYER 1: LOCATION STATE (Where am I physically?)
+// ============================================================================
+export type LocationState =
+  | 'ON_MAIN_ROAD'       // On the main road
+  | 'ON_ENTRY_ROAD'      // On entry road into lot
+  | 'ON_EXIT_ROAD'       // On exit road from lot
+  | 'IN_LOT'             // Inside parking lot (corridors, aisles)
+  | 'IN_SPOT'            // Parked in a spot
+  | 'EXITED';            // Left the simulation
+
+// ============================================================================
+// LAYER 2: INTENT STATE (What is my goal?)
+// ============================================================================
+export type IntentState =
+  | 'SEEKING_PARKING'    // Looking for/driving to a parking spot
+  | 'PARKED'             // Stationary, waiting
+  | 'EXITING_LOT'        // Leaving the parking lot
+  | 'PASSING_THROUGH';   // Just driving through (road traffic)
+
+// ============================================================================
+// LAYER 3: BEHAVIOR FLAGS (Active micro-behaviors that modify movement)
+// ============================================================================
+export interface BehaviorFlags {
+  // Movement behaviors
+  isReversing: boolean;        // Moving backward (opposite to heading)
+  isChangingLane: boolean;     // Actively changing lanes
+  isYielding: boolean;         // Yielding to another vehicle
+  isMerging: boolean;          // Actively merging into traffic
+
+  // Waiting behaviors
+  isWaitingAtLight: boolean;   // Stopped at traffic light
+  isWaitingToMerge: boolean;   // Waiting for gap to merge
+  isWaitingForSpot: boolean;   // Waiting for spot to clear
+
+  // Lane change tracking
+  laneChangeProgress: number;  // 0 to 1, progress through lane change
+  laneChangeDirection: 'left' | 'right' | null;  // Which direction changing
+}
+
+// ============================================================================
+// LAYER 4: TRAFFIC CONTROL STATE (Traffic light/sign awareness)
+// ============================================================================
+export type TrafficLightColor = 'red' | 'yellow' | 'green';
+
+export interface TrafficControlState {
+  nearestLightId: string | null;       // ID of nearest traffic light
+  lightColor: TrafficLightColor | null; // Current color of that light
+  distanceToLight: number;              // Distance to the light
+  mustStop: boolean;                    // Whether we must stop for this light
+}
+
+// Default behavior flags (all inactive)
+export const DEFAULT_BEHAVIOR_FLAGS: BehaviorFlags = {
+  isReversing: false,
+  isChangingLane: false,
+  isYielding: false,
+  isMerging: false,
+  isWaitingAtLight: false,
+  isWaitingToMerge: false,
+  isWaitingForSpot: false,
+  laneChangeProgress: 0,
+  laneChangeDirection: null,
+};
+
+// ============================================================================
+// LEGACY VEHICLE STATE (kept for compatibility, maps to new layers)
+// ============================================================================
 export type VehicleState =
   | 'APPROACHING'        // Coming from access road toward entry
   | 'ENTERING'           // Entering the lot through entry gate
@@ -91,9 +168,29 @@ export interface Vehicle {
   speed: number;          // m/s
   targetSpeed: number;    // m/s - what we're accelerating toward
   acceleration: number;   // m/s² - current acceleration
-  isReversing: boolean;   // true when backing up (moving opposite to heading)
 
-  // State machine
+  // =========================================================================
+  // LAYERED STATE MODEL
+  // =========================================================================
+
+  // Layer 1: Location (where am I?)
+  location: LocationState;
+
+  // Layer 2: Intent (what am I trying to do?)
+  intent: IntentState;
+
+  // Layer 3: Active behaviors (what micro-behaviors are active?)
+  behaviors: BehaviorFlags;
+
+  // Layer 4: Traffic control awareness
+  trafficControl: TrafficControlState;
+
+  // Lane tracking (for lane changes on multi-lane roads)
+  currentLane: number | null;   // Current lane (0 = leftmost/top)
+  targetLane: number | null;    // Target lane for lane change
+  laneChangeStartY: number | null; // Y position when lane change started
+
+  // Legacy state (for compatibility during transition)
   state: VehicleState;
 
   // Navigation
@@ -151,6 +248,28 @@ export interface Aisle {
 }
 
 // ----------------------------------------------------------------------------
+// TRAFFIC LIGHT (Part of Topology)
+// ----------------------------------------------------------------------------
+export interface TrafficLight {
+  id: string;
+  // Position
+  x: number;
+  y: number;
+  // What this light controls
+  controlsDirection: 'north' | 'south' | 'east' | 'west';
+  // Current state
+  color: TrafficLightColor;
+  // Timing (in seconds)
+  greenDuration: number;
+  yellowDuration: number;
+  redDuration: number;
+  currentPhaseTime: number;   // Time spent in current phase
+  // Association
+  roadSegmentId: string;      // Which road segment this light is on
+  stopLinePosition: number;   // Distance along road where cars should stop
+}
+
+// ----------------------------------------------------------------------------
 // TOPOLOGY (Complete parking lot layout)
 // ----------------------------------------------------------------------------
 export interface Topology {
@@ -179,6 +298,9 @@ export interface Topology {
   // Internal structure
   aisles: Aisle[];
   spots: ParkingSpot[];
+
+  // Traffic control infrastructure
+  trafficLights: TrafficLight[];
 }
 
 // ----------------------------------------------------------------------------
@@ -190,6 +312,9 @@ export interface RoadVehicle {
   y: number;
   lane: number;
   speed: number;
+  // Lane change support for road vehicles too
+  targetLane: number | null;
+  laneChangeProgress: number;
 }
 
 // ----------------------------------------------------------------------------

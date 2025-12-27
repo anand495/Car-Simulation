@@ -8,6 +8,7 @@ import {
   ParkingSpot,
   RoadSegment,
   Point,
+  TrafficLight,
   PARKING_SPOT_LENGTH,
   PARKING_SPOT_WIDTH,
   AISLE_WIDTH,
@@ -165,6 +166,9 @@ export function createStandardLot(
     y: lotY + lotHeight,
   };
 
+  // Traffic lights (empty for standard lot - can be added for complex topologies)
+  const trafficLights: TrafficLight[] = [];
+
   return {
     mainRoad,
     entryRoad,
@@ -180,7 +184,41 @@ export function createStandardLot(
     exitPoint,
     aisles,
     spots,
+    trafficLights,
   };
+}
+
+// ----------------------------------------------------------------------------
+// LANE UTILITIES
+// ----------------------------------------------------------------------------
+
+/**
+ * Get the y-coordinate for a specific lane on a road segment.
+ * Lane 0 is the topmost (northernmost) lane.
+ */
+export function getLaneY(road: RoadSegment, lane: number): number {
+  const laneWidth = road.width / road.lanes;
+  // For horizontal roads: y is the center, lanes are distributed north to south
+  return road.y - road.width / 2 + laneWidth / 2 + lane * laneWidth;
+}
+
+/**
+ * Get the lane number for a given y-coordinate on a road.
+ * Returns null if not on the road.
+ */
+export function getLaneAtY(road: RoadSegment, y: number): number | null {
+  const laneWidth = road.width / road.lanes;
+  const roadTop = road.y + road.width / 2;
+  const roadBottom = road.y - road.width / 2;
+
+  if (y < roadBottom || y > roadTop) {
+    return null; // Not on this road
+  }
+
+  // Calculate which lane
+  const distFromTop = roadTop - y;
+  const lane = Math.floor(distFromTop / laneWidth);
+  return Math.min(lane, road.lanes - 1);
 }
 
 // ----------------------------------------------------------------------------
@@ -281,25 +319,48 @@ function isInLot(pos: Point, lot: { x: number; y: number; width: number; height:
 
 /**
  * Generate path from main road through entry road to a parking spot.
+ *
+ * NOTE: The first waypoint uses a placeholder y-value (0) because the vehicle's
+ * actual y-position on the main road is controlled by lane change logic, not pathfinding.
+ * The simulation overrides y-position based on currentLane while on the main road.
  */
 export function generateEntryPath(
   topology: Topology,
-  spot: ParkingSpot
+  spot: ParkingSpot,
+  spawnLane: number = 0
 ): Point[] {
   const path: Point[] = [];
   const { mainRoad, entryRoad, entryPoint, lot } = topology;
 
-  // Start on main road (coming from east since road is westbound)
-  path.push({ x: mainRoad.x + mainRoad.length, y: mainRoad.y });
+  // Calculate y-positions for main road lanes
+  const mainLaneWidth = mainRoad.width / mainRoad.lanes;
+  const spawnLaneY = mainRoad.y - mainRoad.width / 2 + mainLaneWidth / 2 + spawnLane * mainLaneWidth;
+  const bottomLaneY = mainRoad.y - mainRoad.width / 2 + mainLaneWidth / 2; // Lane 0
 
-  // Turn off main road onto entry road
-  path.push({ x: entryRoad.x, y: mainRoad.y });
+  // Calculate x-position for entry road lane
+  // Entry road has 2 lanes - randomly assign to left or right lane
+  const entryLaneWidth = entryRoad.width / entryRoad.lanes;
+  const entryLane = Math.floor(Math.random() * entryRoad.lanes);
+  // For vertical road: lane 0 is left (west), lane 1 is right (east)
+  const entryLaneX = entryRoad.x - entryRoad.width / 2 + entryLaneWidth / 2 + entryLane * entryLaneWidth;
+
+  // Start on main road in spawn lane (y will be updated by lane change logic)
+  path.push({ x: mainRoad.x + mainRoad.length, y: spawnLaneY });
+
+  // Drive west on main road until reaching entry road x-position (staying in lane 0)
+  // This waypoint ensures car is at the correct x before turning
+  path.push({ x: entryLaneX, y: bottomLaneY });
+
+  // Turn south onto entry road - first waypoint just below main road
+  // This creates a proper right turn instead of diagonal cut
+  const mainRoadBottom = mainRoad.y - mainRoad.width / 2;
+  path.push({ x: entryLaneX, y: mainRoadBottom - 5 });
 
   // Drive down entry road to lot
-  path.push({ x: entryRoad.x, y: entryPoint.y });
+  path.push({ x: entryLaneX, y: entryPoint.y });
 
   // Enter the lot
-  path.push({ x: entryRoad.x, y: lot.y + lot.height - 10 });
+  path.push({ x: entryLaneX, y: lot.y + lot.height - 10 });
 
   // Find the aisle for this spot
   const aisle = topology.aisles.find((a) => a.id === spot.aisleId)!;
@@ -328,6 +389,19 @@ export function generateExitPath(
   const path: Point[] = [];
   const { mainRoad, exitRoad, exitPoint, lot } = topology;
 
+  // Calculate bottom lane y-position (lane 0 is closest to lot for merging onto road)
+  // Lane 0 = south/bottom, cars merge here and can then change lanes if needed
+  const mainLane = 0; // Bottom lane on main road
+  const mainLaneWidth = mainRoad.width / mainRoad.lanes;
+  const laneY = mainRoad.y - mainRoad.width / 2 + mainLaneWidth / 2 + mainLane * mainLaneWidth;
+
+  // Calculate x-position for exit road lane
+  // Exit road has 2 lanes - randomly assign to left or right lane
+  const exitLaneWidth = exitRoad.width / exitRoad.lanes;
+  const exitLane = Math.floor(Math.random() * exitRoad.lanes);
+  // For vertical road: lane 0 is left (west), lane 1 is right (east)
+  const exitLaneX = exitRoad.x - exitRoad.width / 2 + exitLaneWidth / 2 + exitLane * exitLaneWidth;
+
   // Start at spot
   path.push({ x: spot.x, y: spot.y });
 
@@ -342,14 +416,14 @@ export function generateExitPath(
   // Navigate to top of lot along left corridor
   path.push({ x: exitCorridorX, y: lot.y + lot.height - 10 });
 
-  // Go to exit point
-  path.push({ x: exitPoint.x, y: exitPoint.y });
+  // Go to exit point (use the assigned exit lane)
+  path.push({ x: exitLaneX, y: exitPoint.y });
 
-  // Drive up exit road
-  path.push({ x: exitRoad.x, y: mainRoad.y });
+  // Drive up exit road to main road level (bottom lane)
+  path.push({ x: exitLaneX, y: laneY });
 
-  // Merge onto main road (turn left/west since road is westbound)
-  path.push({ x: mainRoad.x, y: mainRoad.y });
+  // Merge onto main road in bottom lane (turn left/west since road is westbound)
+  path.push({ x: mainRoad.x, y: laneY });
 
   return path;
 }

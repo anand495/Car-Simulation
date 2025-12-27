@@ -189,6 +189,13 @@ function drawVehicle(
     color = COLORS.vehicleWaiting;
   }
 
+  // Highlight lane-changing vehicles with a pulsing effect
+  if (vehicle.behaviors.isChangingLane) {
+    // Blend with yellow during lane change
+    const pulse = Math.sin(Date.now() / 100) * 0.3 + 0.7;
+    color = `rgba(255, 200, 0, ${pulse})`;
+  }
+
   ctx.save();
   ctx.translate(pos.x, pos.y);
   ctx.rotate(-vehicle.heading); // negative because canvas y is flipped
@@ -200,6 +207,15 @@ function drawVehicle(
   // Draw front indicator
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(length / 2 - 3, -width / 4, 3, width / 2);
+
+  // Draw turn signal indicator during lane change
+  if (vehicle.behaviors.isChangingLane && vehicle.behaviors.laneChangeDirection) {
+    ctx.fillStyle = '#ffcc00';
+    const signalY = vehicle.behaviors.laneChangeDirection === 'right' ? width / 3 : -width / 3;
+    ctx.beginPath();
+    ctx.arc(-length / 4, signalY, 2 * camera.zoom, 0, Math.PI * 2);
+    ctx.fill();
+  }
 
   ctx.restore();
 }
@@ -216,6 +232,7 @@ function drawRoadVehicle(
 
   ctx.save();
   ctx.translate(pos.x, pos.y);
+  ctx.rotate(Math.PI); // Face west (road is westbound)
 
   // Draw car body (gray for background traffic)
   ctx.fillStyle = '#666666';
@@ -305,7 +322,6 @@ export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const simRef = useRef<Simulation | null>(null);
   const cameraRef = useRef<Camera>({ x: 150, y: 200, zoom: 2 });
-  const runningRef = useRef(false);
   const fpsRef = useRef(60);
 
   const [stats, setStats] = useState<Stats>({
