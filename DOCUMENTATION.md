@@ -63,6 +63,7 @@ Understanding where to make changes is critical for maintaining clean separation
 | Change state transition triggers | Behavior | Decision logic |
 | Add speed limit to area | Topology | Property of the physical space |
 | Change how cars accelerate | Behavior | Physics/movement rules |
+| Add despawn point | Topology + Behavior | Topology defines location; behavior needs `isWithinPavedArea()` extended |
 
 #### Common Scenarios
 
@@ -82,6 +83,29 @@ Understanding where to make changes is critical for maintaining clean separation
 **Scenario 4: Adding a traffic light**
 - Topology: Add `TrafficLight` object to `trafficLights[]`
 - Behavior: Add logic to detect lights, stop at red, proceed on green
+
+#### Key Insight: Despawn Boundaries
+
+When creating new topologies, the **paved area bounds** must extend beyond the **visual road** to allow vehicles to reach despawn points:
+
+```typescript
+// In isWithinPavedArea():
+// Despawn happens at mainRoad.x - 20, so paved area must extend to at least mainRoad.x - 50
+const mainRoadLeft = mainRoad.x - 50; // NOT mainRoad.x
+
+// Similarly for other roads where vehicles exit the simulation
+```
+
+**Why this matters:**
+- Movement is validated against `isWithinPavedArea()` before being applied
+- If paved area ends at `mainRoad.x`, vehicles cannot move to `x < 0`
+- Despawn check is `x < mainRoad.x - 20`, so vehicles get stuck oscillating at x ≈ 0
+- Solution: Extend paved bounds 50m beyond the visual road end
+
+**Checklist for new topologies:**
+1. Identify all despawn points (where vehicles exit the simulation)
+2. Ensure `isWithinPavedArea()` extends at least 30m beyond each despawn point
+3. Test that vehicles can actually reach despawn points, not just approach them
 
 #### Key Insight: Path Generation
 
@@ -706,6 +730,12 @@ APPROACHING → ENTERING → NAVIGATING_TO_SPOT → PARKING → PARKED
 PARKED → EXITING_SPOT → DRIVING_TO_EXIT → IN_EXIT_LANE → AT_MERGE_POINT → MERGING → ON_ROAD → EXITED
 ```
 
+**Pass-Through Flow (PASSING_THROUGH intent):**
+```
+ON_ROAD → EXITED
+```
+Pass-through vehicles simply drive west on the main road without entering the lot. They create realistic traffic that parking vehicles must navigate around when changing lanes or merging.
+
 | State | Description | Speed | Location |
 |-------|-------------|-------|----------|
 | `APPROACHING` | On main road, driving west toward entry | 13.4 m/s (30 mph) | `ON_MAIN_ROAD` |
@@ -885,15 +915,21 @@ Cars on main road yield to vehicles changing lanes in front of them.
 Cars at merge point (top of exit road) wait for safe gaps before merging.
 
 **Gap Requirements:**
-- Safe gap time: 3 seconds
-- Safe gap distance: 3 × 13.4 m/s = 40.2 m
-- Checks both road vehicles (grey) and other merging/on-road vehicles
+- Gap ahead: 10m (2 car lengths)
+- Gap behind: 30m (2 seconds at road speed)
+- Time-to-reach check: approaching vehicles must be >2s away
+- Checks all vehicles on main road (pass-through and post-merge traffic)
 
 **Merge Execution:**
 - When gap found: state changes to `MERGING`
 - Speed: 3.0 m/s (accelerating)
-- Upon reaching main road y-position: state becomes `ON_ROAD`
+- Upon reaching lane 0 y-position: state becomes `ON_ROAD`
 - Lane assigned: 0 (bottom lane where exit road joins)
+- Heading snapped to west (π) for clean traffic flow
+
+**Timeout Protection:**
+- After 10 seconds waiting, uses relaxed `hasMinimalMergeGap()` check
+- Prevents indefinite waiting during heavy traffic
 
 ---
 
@@ -1296,6 +1332,44 @@ This pattern ensures:
   - This spreads traffic across the lot width instead of single corridor
   - When one car stops, cars with different destinations can pass on different paths
 
+### Version 3.0 - Unified Traffic Model & Severe Exodus
+
+- Replaced separate grey background traffic with unified vehicle model
+- All traffic now uses full simulation vehicles with proper physics and collision detection
+
+- **Traffic Model Changes**:
+  1. Removed `RoadVehicle` type and grey car rendering
+  2. Added `PASSING_THROUGH` intent for vehicles that drive straight through
+  3. Pass-through vehicles spawn continuously based on `roadTrafficRate` config
+  4. Pass-through vehicles stay in their spawn lane (no lane changing needed)
+  5. All vehicles now participate in full collision detection and gap checking
+
+- **Benefits of unified model**:
+  - Pass-through traffic properly interacts with parking vehicles
+  - Lane change gap checking now includes pass-through vehicles
+  - Merge gap detection considers all traffic, not just roadVehicles array
+  - More realistic traffic dynamics - everyone follows same physics rules
+
+- **Severe Exodus Mode**:
+  - Removed staggered exit timing (`staggerExitSeconds` config ignored)
+  - All parked cars attempt to exit simultaneously when exodus starts
+  - Creates maximum congestion for stress testing and realistic worst-case scenario
+  - Useful for studying traffic jams and bottleneck behavior
+
+- **Implementation Details**:
+  - `spawnPassThroughVehicle()` creates full Vehicle objects with `intent: 'PASSING_THROUGH'`
+  - Pass-through vehicles use `state: 'ON_ROAD'` and exit when `x < mainRoad.x - 20`
+  - `canMerge()` and `hasMinimalMergeGap()` now check `state.vehicles` instead of `roadVehicles`
+  - `canChangeLane()` considers all vehicles on main road
+
+- **Vehicle Cleanup (Memory Management)**:
+  - Vehicles with `state: 'EXITED'` are removed from array each frame
+  - Prevents memory buildup from continuous pass-through traffic
+  - `exitedCount` tracked incrementally before removal
+  - EXODUS completion checks for no remaining parking vehicles (ignoring pass-through)
+
+---
+
 ### Version 2.9 - Merge Point Improvements
 
 - Improved merge logic to prevent cars from getting stuck when exiting the lot
@@ -1361,14 +1435,71 @@ This pattern ensures:
 
 ---
 
+### Version 3.1 - Disciplined Yielding
+
+- Implemented realistic yielding behavior where vehicles slow down for turning and merging cars
+
+- **Problem observed**: After implementing the unified traffic model (v3.0), pass-through vehicles would rear-end parking-seeking vehicles that were turning into the entry road:
+  1. When a vehicle in lane 0 turned south, its y-position started changing
+  2. Following vehicles used lateral distance to determine "blocking" status
+  3. Because the turning car's y was now different, it wasn't detected as blocking
+  4. Following cars maintained speed and collided with the turning car
+
+- **Root cause**: The gap detection (`getGapAhead`) only considered vehicles directly ahead in the same lane, not vehicles actively turning or changing lanes
+
+- **Solution 1 - Heading-Aware Gap Detection**:
+  - Enhanced `getGapAhead()` to detect vehicles that are turning (heading differs from westbound by more than 30°)
+  - Also detects vehicles that are slowing significantly (preparing to turn)
+  - Near the entry zone, if a car ahead is turning or slowing, treat it as blocking
+
+  ```typescript
+  // Check if the other vehicle is turning (heading significantly different from west)
+  const headingDiff = Math.abs(normalizeAngle(other.heading - Math.PI));
+  const isTurning = headingDiff > Math.PI / 6; // More than 30° off from west
+  const isSlowingDown = other.speed < SPEEDS.MAIN_ROAD * 0.5;
+
+  if (isTurning || isSlowingDown) {
+    if (dist < 15 && ahead > 1) {
+      isBlocking = true;
+    }
+  }
+  ```
+
+- **Solution 2 - Cooperative Yielding for Turning Cars**:
+  - Enhanced `getCooperativeYieldSpeed()` to yield to vehicles turning at entry zone
+  - Looks ahead 40m for vehicles that are turning (heading differs by more than ~22°)
+  - Computes safe following speed with 2× car length gap
+
+- **Solution 3 - Proactive Slowdown in Lane 0**:
+  - Pass-through vehicles in lane 0 now slow to 70% of road speed when near entry zone
+  - Applied when within -20m to +50m of entry road x-position
+  - Gives turning vehicles more time and reduces collision risk
+
+- **Solution 4 - Yield to Merging Vehicles**:
+  - `getGapAhead()` now detects vehicles in MERGING or AT_MERGE_POINT state
+  - When near exit zone, treats merging vehicles as blocking
+  - Prevents collisions at the exit road merge point
+
+- **Junction Bounds Fix**:
+  - Fixed `isWithinPavedArea()` bounds for entry/exit roads
+  - Entry and exit road tops now overlap with main road center (`mainRoad.y`)
+  - Provides junction continuity for smooth transitions between roads
+  - Previously, there could be a gap at junctions preventing valid movements
+
+- **Despawn Boundary Fix**:
+  - Extended main road left boundary in `isWithinPavedArea()` from `mainRoad.x` to `mainRoad.x - 50`
+  - Allows vehicles to continue driving west past x=0 to reach the despawn point at x < -20
+  - Previously, vehicles were getting stuck oscillating around x=0 because movement was blocked
+
+---
+
 ## Known Limitations
 
-1. No lane changing for background road traffic (grey vehicles)
-2. Single-file movement in aisles (no passing)
-3. Simplified merging logic (gap-based only)
-4. No pedestrians
-5. All vehicles same size
-6. Traffic lights defined but not yet active in simulation loop
+1. Single-file movement in aisles (no passing)
+2. Simplified merging logic (gap-based only)
+3. No pedestrians
+4. All vehicles same size
+5. Traffic lights defined but not yet active in simulation loop
 
 ---
 
@@ -1376,8 +1507,9 @@ This pattern ensures:
 
 - [x] Lane changing on main road (implemented v2.2)
 - [x] Traffic light infrastructure (implemented v2.1)
+- [x] Unified traffic model - all vehicles follow same rules (implemented v3.0)
+- [x] Disciplined yielding at intersections (implemented v3.1)
 - [ ] Activate traffic light simulation loop
-- [ ] Lane changing for background road traffic
 - [ ] Proper collision avoidance (not just detection)
 - [ ] Different vehicle types/sizes
 - [ ] Pedestrian simulation

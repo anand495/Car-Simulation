@@ -3,7 +3,6 @@ import { Simulation } from './simulation';
 import { createStandardLot, getWorldBounds } from './topology';
 import {
   Vehicle,
-  RoadVehicle,
   Topology,
   SimulationPhase,
   COLORS,
@@ -220,26 +219,8 @@ function drawVehicle(
   ctx.restore();
 }
 
-function drawRoadVehicle(
-  ctx: CanvasRenderingContext2D,
-  vehicle: RoadVehicle,
-  camera: Camera,
-  canvas: HTMLCanvasElement
-): void {
-  const pos = worldToScreen(vehicle.x, vehicle.y, camera, canvas);
-  const length = CAR_LENGTH * camera.zoom;
-  const width = CAR_WIDTH * camera.zoom;
-
-  ctx.save();
-  ctx.translate(pos.x, pos.y);
-  ctx.rotate(Math.PI); // Face west (road is westbound)
-
-  // Draw car body (gray for background traffic)
-  ctx.fillStyle = '#666666';
-  ctx.fillRect(-length / 2, -width / 2, length, width);
-
-  ctx.restore();
-}
+// Note: drawRoadVehicle removed - all vehicles including pass-through traffic
+// are now rendered via drawVehicle as full simulation vehicles
 
 function drawStats(
   ctx: CanvasRenderingContext2D,
@@ -290,12 +271,7 @@ function render(
   // Draw topology
   drawTopology(ctx, sim.topology, camera, canvas);
 
-  // Draw road vehicles
-  for (const rv of sim.state.roadVehicles) {
-    drawRoadVehicle(ctx, rv, camera, canvas);
-  }
-
-  // Draw vehicles
+  // Draw all vehicles (including pass-through traffic - no more separate grey cars)
   for (const vehicle of sim.state.vehicles) {
     drawVehicle(ctx, vehicle, camera, canvas);
   }

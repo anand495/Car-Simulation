@@ -45,7 +45,6 @@ export class Simulation {
 
   private spatialGrid: Map<string, Vehicle[]> = new Map();
   private nextVehicleId = 0;
-  private nextRoadVehicleId = 0;
   private exitTimes: number[] = [];
 
   // Logging
@@ -100,7 +99,15 @@ export class Simulation {
     // Resolve any collisions
     this.resolveCollisions();
 
-    // Update counters
+    // Count exited vehicles before removing them
+    const newlyExited = this.state.vehicles.filter(v => v.state === 'EXITED').length;
+    this.state.exitedCount += newlyExited;
+
+    // Remove exited vehicles to prevent memory buildup
+    // Keep only vehicles that haven't exited yet
+    this.state.vehicles = this.state.vehicles.filter(v => v.state !== 'EXITED');
+
+    // Update counters (parkedCount, throughput, avgExitTime)
     this.updateCounters();
 
     // Update time
@@ -426,30 +433,60 @@ export class Simulation {
 
   /**
    * Checks if any vehicle in an adjacent lane is ahead of us and signaling
-   * to merge into our lane. If so, returns a speed to maintain a gap.
+   * to merge into our lane. Also implements proactive slowdown near junctions.
    */
   private getCooperativeYieldSpeed(me: Vehicle): number {
     if (me.location !== 'ON_MAIN_ROAD' || me.currentLane === null) return Infinity;
 
     const lookAhead = 40; // Look ahead for mergers
     const nearby = this.getNearbyVehicles(me.x, me.y, lookAhead);
+    let yieldSpeed = Infinity;
 
     for (const other of nearby) {
       if (other.id === me.id) continue;
-      
-      // Is the other car changing lanes?
+
+      // Is the other car changing lanes into our lane?
       if (other.behaviors.isChangingLane && other.targetLane === me.currentLane) {
         // Is it ahead of me? (Westbound: smaller X is ahead)
-        if (other.x < me.x && other.x > me.x - lookAhead) { 
-           // Yes, they are cutting in front.
-           // Return a speed that maintains a gap to them
+        if (other.x < me.x && other.x > me.x - lookAhead) {
            const dist = me.x - other.x;
-           // Target a gap slightly larger than normal to encourage the merge
-           return this.computeSpeedFromGap(me, dist - CAR_LENGTH * 1.5);
+           yieldSpeed = Math.min(yieldSpeed, this.computeSpeedFromGap(me, dist - CAR_LENGTH * 1.5));
+        }
+      }
+
+      // Yield to vehicles turning at entry zone (even if they haven't changed location yet)
+      if (me.currentLane === 0 && other.location === 'ON_MAIN_ROAD') {
+        const { entryRoad } = this.topology;
+        const nearEntry = other.x >= entryRoad.x - 10 && other.x <= entryRoad.x + 10;
+
+        if (nearEntry && other.x < me.x) {
+          // Check if they're turning or about to turn
+          const headingDiff = Math.abs(normalizeAngle(other.heading - Math.PI));
+          const isTurning = headingDiff > Math.PI / 8; // Even 22.5° off from west
+          const isSlowingDown = other.speed < SPEEDS.MAIN_ROAD * 0.3;
+
+          if (isTurning || isSlowingDown) {
+            const dist = me.x - other.x;
+            yieldSpeed = Math.min(yieldSpeed, this.computeSpeedFromGap(me, dist - CAR_LENGTH * 2));
+          }
         }
       }
     }
-    return Infinity;
+
+    // PROACTIVE SLOWDOWN: When in lane 0 approaching the entry zone, slow down slightly
+    // to give time to react to cars turning. This is realistic defensive driving.
+    if (me.currentLane === 0 && me.intent !== 'SEEKING_PARKING') {
+      const { entryRoad } = this.topology;
+      const distToEntry = me.x - entryRoad.x;
+
+      // Start slowing 50m before entry zone, continue until 20m past
+      if (distToEntry > -20 && distToEntry < 50) {
+        // Reduce max speed to 70% when passing the entry zone
+        yieldSpeed = Math.min(yieldSpeed, SPEEDS.MAIN_ROAD * 0.7);
+      }
+    }
+
+    return yieldSpeed;
   }
 
   private getMaxSpeedForState(state: VehicleState): number {
@@ -502,6 +539,19 @@ export class Simulation {
       if (other.state === 'EXITED') continue;
       // Note: PARKED cars ARE obstacles - they should block movement
 
+      // Skip vehicles on different roads (they can't block us)
+      // Exception: check all vehicles when at junctions (entry/exit points)
+      if (vehicle.location !== other.location) {
+        // Only consider cross-location conflicts at specific transition zones
+        const atJunction = vehicle.location === 'ON_MAIN_ROAD' &&
+                          (other.location === 'ON_ENTRY_ROAD' || other.location === 'ON_EXIT_ROAD');
+        const otherAtJunction = other.location === 'ON_MAIN_ROAD' &&
+                                (vehicle.location === 'ON_ENTRY_ROAD' || vehicle.location === 'ON_EXIT_ROAD');
+        if (!atJunction && !otherAtJunction) {
+          continue; // Different roads, not at junction - skip
+        }
+      }
+
       // Check if other vehicle is ahead of us
       const dx = other.x - vehicle.x;
       const dy = other.y - vehicle.y;
@@ -521,29 +571,53 @@ export class Simulation {
 
         // Check if in our lane (within vehicle widths)
         // Use 1.5x width - balanced between false positives and missing real conflicts
-        if (lateral < CAR_WIDTH * 1.5) {
+        let isBlocking = lateral < CAR_WIDTH * 1.5;
+
+        // DISCIPLINED YIELDING: Yield to vehicles that are turning or merging at junctions.
+        // This prevents rear-ending and creates realistic traffic flow.
+        if (!isBlocking && vehicle.location === 'ON_MAIN_ROAD') {
+          const { entryRoad, exitRoad } = this.topology;
+
+          // Case 1: Yield to vehicles turning into entry road
+          if (other.location === 'ON_MAIN_ROAD') {
+            const nearEntryZone = other.x >= entryRoad.x - entryRoad.width / 2 - 10 &&
+                                  other.x <= entryRoad.x + entryRoad.width / 2 + 10;
+
+            if (nearEntryZone) {
+              // Check if the other vehicle is turning (heading significantly different from west)
+              const headingDiff = Math.abs(normalizeAngle(other.heading - Math.PI));
+              const isTurning = headingDiff > Math.PI / 6; // More than 30° off from west
+
+              // Also check if they're slowing down significantly (preparing to turn)
+              const isSlowingDown = other.speed < SPEEDS.MAIN_ROAD * 0.5;
+
+              if (isTurning || isSlowingDown) {
+                if (dist < 15 && ahead > 1) {
+                  isBlocking = true;
+                }
+              }
+            }
+          }
+
+          // Case 2: Yield to vehicles merging from exit road
+          if (other.state === 'MERGING' || other.state === 'AT_MERGE_POINT') {
+            const nearExitZone = Math.abs(other.x - exitRoad.x) < exitRoad.width + 10;
+            if (nearExitZone && dist < 20 && ahead > 0) {
+              // A car is merging ahead - yield
+              isBlocking = true;
+            }
+          }
+        }
+
+        if (isBlocking) {
           const edgeGap = dist - CAR_LENGTH; // edge-to-edge
           minGap = Math.min(minGap, edgeGap);
         }
       }
     }
 
-    // Also check road vehicles when merging
-    if (
-      vehicle.state === 'MERGING' ||
-      vehicle.state === 'AT_MERGE_POINT' ||
-      vehicle.state === 'ON_ROAD'
-    ) {
-      for (const rv of this.state.roadVehicles) {
-        const dx = rv.x - vehicle.x;
-        const dy = rv.y - vehicle.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist < lookAhead && dx > 0) {
-          // Ahead on road
-          minGap = Math.min(minGap, dist - CAR_LENGTH);
-        }
-      }
-    }
+    // Note: roadVehicles array is no longer used - all traffic (including pass-through)
+    // is now in the main vehicles array and already checked above
 
     return minGap;
   }
@@ -610,7 +684,8 @@ export class Simulation {
     const isAtTurnZone = vehicle.location === 'ON_MAIN_ROAD' &&
                           vehicle.x >= entryRoadLeft - 5 &&
                           vehicle.x <= entryRoadRight + 5;
-    const canTurn = isAtTurnZone && vehicle.currentLane === 0; // Must be in bottom lane to turn
+    // Can only turn if: in turn zone, in lane 0, AND seeking parking (not pass-through)
+    const canTurn = isAtTurnZone && vehicle.currentLane === 0 && vehicle.intent === 'SEEKING_PARKING';
 
     // When at turn point AND in correct lane, prepare for the turn:
     if (canTurn && vehicle.pathIndex < 2) {
@@ -741,25 +816,28 @@ export class Simulation {
     const { mainRoad, entryRoad, exitRoad, lot } = this.topology;
 
     // Check main road bounds
+    // Extend left boundary past the visual road to allow vehicles to reach despawn point (x < -20)
     const mainRoadTop = mainRoad.y + mainRoad.width / 2;
     const mainRoadBottom = mainRoad.y - mainRoad.width / 2;
-    const mainRoadLeft = mainRoad.x;
+    const mainRoadLeft = mainRoad.x - 50; // Extended past x=0 to allow despawning at x < -20
     const mainRoadRight = mainRoad.x + mainRoad.length;
     const onMainRoad = x >= mainRoadLeft && x <= mainRoadRight &&
                        y >= mainRoadBottom && y <= mainRoadTop;
 
     // Check entry road bounds (vertical road going down from main road)
+    // Entry road overlaps with main road at the junction to allow smooth transitions
     const entryLeft = entryRoad.x - entryRoad.width / 2;
     const entryRight = entryRoad.x + entryRoad.width / 2;
-    const entryTop = mainRoad.y + mainRoad.width / 2; // Connects to main road
+    const entryTop = mainRoad.y; // Overlap with main road center for junction continuity
     const entryBottom = entryRoad.y;
     const onEntryRoad = x >= entryLeft && x <= entryRight &&
                         y >= entryBottom && y <= entryTop;
 
     // Check exit road bounds (vertical road going up to main road)
+    // Exit road overlaps with main road at the junction to allow smooth transitions
     const exitLeft = exitRoad.x - exitRoad.width / 2;
     const exitRight = exitRoad.x + exitRoad.width / 2;
-    const exitTop = mainRoad.y + mainRoad.width / 2; // Connects to main road
+    const exitTop = mainRoad.y; // Overlap with main road center for junction continuity
     const exitBottom = exitRoad.y;
     const onExitRoad = x >= exitLeft && x <= exitRight &&
                        y >= exitBottom && y <= exitTop;
@@ -786,7 +864,7 @@ export class Simulation {
     // Check distance to entry road (most likely for this bug)
     const entryLeft = entryRoad.x - entryRoad.width / 2;
     const entryRight = entryRoad.x + entryRoad.width / 2;
-    const entryTop = mainRoad.y + mainRoad.width / 2;
+    const entryTop = mainRoad.y; // Overlap with main road center
     const entryBottom = entryRoad.y;
 
     // Clamp to entry road bounds
@@ -812,7 +890,7 @@ export class Simulation {
     // Check distance to exit road
     const exitLeft = exitRoad.x - exitRoad.width / 2;
     const exitRight = exitRoad.x + exitRoad.width / 2;
-    const exitTop = mainRoad.y + mainRoad.width / 2;
+    const exitTop = mainRoad.y; // Overlap with main road center
     const exitBottom = exitRoad.y;
 
     const clampedExitX = Math.max(exitLeft, Math.min(exitRight, vehicle.x));
@@ -983,29 +1061,7 @@ export class Simulation {
     const minGapAhead = PHYSICS.LANE_CHANGE_MIN_GAP;
     const minGapBehind = PHYSICS.LANE_CHANGE_LOOK_BEHIND;
 
-    // Check road vehicles in target lane
-    for (const rv of this.state.roadVehicles) {
-      if (rv.lane !== targetLane) continue;
-
-      const dx = rv.x - vehicle.x;
-
-      // Vehicle ahead in target lane
-      if (dx > 0 && dx < minGapAhead) {
-        return false;
-      }
-
-      // Vehicle behind in target lane (check relative speed too)
-      if (dx < 0 && dx > -minGapBehind) {
-        // If vehicle behind is faster, need more gap
-        const speedDiff = rv.speed - vehicle.speed;
-        const timeToClose = speedDiff > 0 ? Math.abs(dx) / speedDiff : Infinity;
-        if (timeToClose < 3) { // Less than 3 seconds to close gap
-          return false;
-        }
-      }
-    }
-
-    // Check other vehicles (simulation vehicles) in target lane
+    // Check all vehicles in target lane (including pass-through traffic)
     for (const other of this.state.vehicles) {
       if (other.id === vehicle.id) continue;
       if (other.state === 'PARKED' || other.state === 'EXITED') continue;
@@ -1102,30 +1158,38 @@ export class Simulation {
    * Only checks for immediate collision danger, not comfortable gaps.
    */
   private hasMinimalMergeGap(vehicle: Vehicle): boolean {
+    const { mainRoad } = this.topology;
     const mergeX = vehicle.x;
     const minSafeGap = CAR_LENGTH * 1.5; // Just enough to avoid collision
 
-    // Check road vehicles for immediate danger only
-    for (const rv of this.state.roadVehicles) {
-      const dx = rv.x - mergeX;
+    // Check all vehicles on main road (including pass-through traffic)
+    const lane0Y = mainRoad.y - mainRoad.width / 2 + (mainRoad.width / mainRoad.lanes) / 2;
+    for (const other of this.state.vehicles) {
+      if (other.id === vehicle.id) continue;
+      if (other.state === 'EXITED') continue;
+      if (other.location !== 'ON_MAIN_ROAD') continue;
+
+      // Only check vehicles near lane 0 (where we merge)
+      if (Math.abs(other.y - lane0Y) > 5) continue;
+
+      const dx = other.x - mergeX;
+
       // Only block if vehicle is very close
       if (Math.abs(dx) < minSafeGap) {
         return false;
       }
+
       // Or if approaching very fast and close
       if (dx > 0 && dx < minSafeGap * 2) {
-        const timeToReach = dx / rv.speed;
+        const timeToReach = dx / Math.max(other.speed, 1);
         if (timeToReach < 1.5) {
           return false;
         }
       }
-    }
 
-    // Check other merging vehicles
-    for (const other of this.state.vehicles) {
-      if (other.id === vehicle.id) continue;
+      // Check other merging vehicles
       if (other.state === 'MERGING') {
-        if (Math.abs(other.x - mergeX) < CAR_LENGTH * 2) {
+        if (Math.abs(dx) < CAR_LENGTH * 2) {
           return false;
         }
       }
@@ -1146,30 +1210,7 @@ export class Simulation {
     const minGapAhead = CAR_LENGTH * 2; // ~10m ahead
     const minGapBehind = SPEEDS.MAIN_ROAD * 2; // 2 seconds behind (~30m at road speed)
 
-    // Check road vehicles
-    for (const rv of this.state.roadVehicles) {
-      // Road is westbound, so vehicles move left (decreasing x)
-      // rv ahead of merge point: rv.x < mergeX (already passed or will pass soon)
-      // rv behind merge point: rv.x > mergeX (approaching)
-      const dx = rv.x - mergeX;
-
-      // Vehicle ahead (already past our merge point, going west)
-      if (dx < 0 && dx > -minGapAhead) {
-        return false;
-      }
-
-      // Vehicle behind (approaching from east, going west)
-      if (dx > 0 && dx < minGapBehind) {
-        // Check time to reach merge point
-        const timeToReach = dx / rv.speed;
-        if (timeToReach < 2.5) {
-          // Vehicle will reach us in less than 2.5 seconds
-          return false;
-        }
-      }
-    }
-
-    // Check simulation vehicles already on road or merging
+    // Check all vehicles on main road (pass-through and post-merge vehicles)
     const lane0Y = mainRoad.y - mainRoad.width / 2 + (mainRoad.width / mainRoad.lanes) / 2;
     for (const other of this.state.vehicles) {
       if (other.id === vehicle.id) continue;
@@ -1187,8 +1228,13 @@ export class Simulation {
           return false;
         }
 
-        // Avoid merging in front of a fast-moving vehicle
-        if (other.state === 'ON_ROAD' && dx > 0 && dx < minGapBehind) {
+        // Vehicle ahead (already past our merge point, going west)
+        if (dx < 0 && dx > -minGapAhead) {
+          return false;
+        }
+
+        // Vehicle behind (approaching from east, going west)
+        if (dx > 0 && dx < minGapBehind) {
           const timeToReach = dx / Math.max(other.speed, 1);
           if (timeToReach < 2) {
             return false;
@@ -1221,6 +1267,15 @@ export class Simulation {
       for (const v2 of nearby) {
         if (v2.id <= v1.id) continue; // avoid double-checking pairs
         if (v2.state === 'EXITED') continue;
+
+        // Skip collision checks between vehicles on different roads
+        // (unless at junction where they could actually collide)
+        if (v1.location !== v2.location) {
+          const atJunction = (v1.location === 'ON_MAIN_ROAD' || v2.location === 'ON_MAIN_ROAD') &&
+                            (v1.location === 'ON_ENTRY_ROAD' || v2.location === 'ON_ENTRY_ROAD' ||
+                             v1.location === 'ON_EXIT_ROAD' || v2.location === 'ON_EXIT_ROAD');
+          if (!atJunction) continue;
+        }
 
         if (this.checkCollision(v1, v2)) {
           // If v2 is parked, v1 must stop (parked cars don't move)
@@ -1322,43 +1377,92 @@ export class Simulation {
   }
 
   // --------------------------------------------------------------------------
-  // ROAD TRAFFIC
+  // ROAD TRAFFIC (Pass-through vehicles - no more grey background cars)
   // --------------------------------------------------------------------------
 
   private updateRoadTraffic(dt: number): void {
-    // Spawn new road vehicles
+    // Spawn pass-through vehicles at configured rate
+    // These are full simulation vehicles that just drive through without parking
     const spawnRate = this.config.roadTrafficRate / 60; // per second
     if (Math.random() < spawnRate * dt) {
-      this.spawnRoadVehicle();
+      this.spawnPassThroughVehicle();
     }
 
-    // Update existing road vehicles (westbound = decreasing x)
-    for (const rv of this.state.roadVehicles) {
-      rv.x -= rv.speed * dt;
-    }
-
-    // Remove vehicles that have exited (left side of road)
-    this.state.roadVehicles = this.state.roadVehicles.filter(
-      (rv) => rv.x > this.topology.mainRoad.x - 50
-    );
+    // Note: roadVehicles array is no longer used - all traffic is simulation vehicles
+    // Clean up any legacy road vehicles
+    this.state.roadVehicles = [];
   }
 
-  private spawnRoadVehicle(): void {
+  /**
+   * Spawn a pass-through vehicle that drives straight through without parking.
+   * These create realistic traffic that parking vehicles must navigate around.
+   */
+  private spawnPassThroughVehicle(): void {
     const { mainRoad } = this.topology;
-    // Road is westbound, so spawn from the right (east) side
-    const lane = Math.floor(Math.random() * mainRoad.lanes);
-    // Calculate y position based on lane
-    const laneY = getLaneY(mainRoad, lane);
 
-    this.state.roadVehicles.push({
-      id: this.nextRoadVehicleId++,
-      x: mainRoad.x + mainRoad.length, // Spawn at road end, not beyond
+    // Check spawn clearance
+    const spawnX = mainRoad.x + mainRoad.length;
+    const minSpawnClearance = CAR_LENGTH * 2;
+
+    for (const v of this.state.vehicles) {
+      if (v.location === 'ON_MAIN_ROAD') {
+        if (Math.abs(v.x - spawnX) < minSpawnClearance) {
+          return; // Too close, skip spawn
+        }
+      }
+    }
+
+    // Pass-through vehicles can spawn in any lane (realistic traffic)
+    const spawnLane = Math.floor(Math.random() * mainRoad.lanes);
+    const laneY = getLaneY(mainRoad, spawnLane);
+
+    const vehicle: Vehicle = {
+      id: this.nextVehicleId++,
+      x: mainRoad.x + mainRoad.length,
       y: laneY,
-      lane: lane,
-      speed: mainRoad.speedLimit * (0.9 + Math.random() * 0.2),
+      heading: Math.PI, // facing west
+      speed: SPEEDS.MAIN_ROAD,
+      targetSpeed: SPEEDS.MAIN_ROAD,
+      acceleration: 0,
+
+      // Layer 1: Location
+      location: 'ON_MAIN_ROAD',
+
+      // Layer 2: Intent - PASSING_THROUGH (not seeking parking)
+      intent: 'PASSING_THROUGH',
+
+      // Layer 3: Behaviors
+      behaviors: { ...DEFAULT_BEHAVIOR_FLAGS },
+
+      // Layer 4: Traffic control
+      trafficControl: {
+        nearestLightId: null,
+        lightColor: null,
+        distanceToLight: Infinity,
+        mustStop: false,
+      },
+
+      // Lane tracking
+      currentLane: spawnLane,
       targetLane: null,
-      laneChangeProgress: 0,
-    });
+      laneChangeStartY: null,
+
+      // State - ON_ROAD since just passing through
+      state: 'ON_ROAD',
+
+      targetSpotId: null, // No parking target
+      exitLaneId: null,
+      path: [], // No path needed - just drive west
+      pathIndex: 0,
+      spawnTime: this.state.time,
+      parkTime: null,
+      exitStartTime: null,
+      exitCompleteTime: null,
+      waitTime: 0,
+      color: COLORS.vehicle.ON_ROAD,
+    };
+
+    this.state.vehicles.push(vehicle);
   }
 
   // --------------------------------------------------------------------------
@@ -1514,19 +1618,10 @@ export class Simulation {
       (v) => v.state === 'PARKED'
     );
 
-    for (let i = 0; i < parkedVehicles.length; i++) {
-      const vehicle = parkedVehicles[i];
-
-      // Stagger exit times
-      const delay =
-        this.config.staggerExitSeconds > 0
-          ? (i / parkedVehicles.length) * this.config.staggerExitSeconds
-          : 0;
-
-      // Schedule exit
-      setTimeout(() => {
-        this.startVehicleExit(vehicle);
-      }, delay * 1000);
+    // SEVERE EXODUS: All cars try to leave at once!
+    // No staggering - everyone unpacks simultaneously creating maximum congestion
+    for (const vehicle of parkedVehicles) {
+      this.startVehicleExit(vehicle);
     }
   }
 
@@ -1559,9 +1654,8 @@ export class Simulation {
       (v) => v.state === 'PARKED'
     ).length;
 
-    this.state.exitedCount = this.state.vehicles.filter(
-      (v) => v.state === 'EXITED'
-    ).length;
+    // exitedCount is now tracked incrementally in step() before vehicle removal
+    // No need to count here since EXITED vehicles are already removed
 
     // Calculate average exit time
     if (this.exitTimes.length > 0) {
@@ -1569,32 +1663,36 @@ export class Simulation {
         this.exitTimes.reduce((a, b) => a + b, 0) / this.exitTimes.length;
     }
 
-    // Calculate throughput (vehicles per minute over last minute)
-    const oneMinuteAgo = this.state.time - 60;
-    const recentExits = this.state.vehicles.filter(
-      (v) =>
-        v.state === 'EXITED' &&
-        v.exitCompleteTime !== null &&
-        v.exitCompleteTime > oneMinuteAgo
-    ).length;
-    this.state.throughput = recentExits;
+    // Calculate throughput (exits per minute)
+    // Simple approximation: total exits / time in minutes
+    if (this.state.time > 0) {
+      this.state.throughput = Math.round(this.state.exitedCount / (this.state.time / 60));
+    }
   }
 
   private checkPhaseTransitions(): void {
     if (this.state.phase === 'FILLING') {
-      // Check if all vehicles are parked
-      const allParked = this.state.vehicles.every(
+      // Check if all PARKING-INTENT vehicles are parked (ignore pass-through traffic)
+      const parkingVehicles = this.state.vehicles.filter(
+        v => v.intent !== 'PASSING_THROUGH'
+      );
+      const allParked = parkingVehicles.every(
         (v) => v.state === 'PARKED' || v.state === 'EXITED'
       );
-      if (allParked && this.state.parkedCount > 0) {
+      // Also check spawn queue is empty (all requested vehicles have spawned)
+      if (allParked && this.state.parkedCount > 0 && this.spawnQueue <= 0) {
         this.state.phase = 'WAITING';
       }
     }
 
     if (this.state.phase === 'EXODUS') {
       // Check if all vehicles have exited
-      const allExited = this.state.vehicles.every((v) => v.state === 'EXITED');
-      if (allExited && this.state.exitedCount > 0) {
+      // Since we remove EXITED vehicles, check if array is empty (only pass-through remain)
+      // and we've had some exits
+      const parkingVehicles = this.state.vehicles.filter(
+        v => v.intent !== 'PASSING_THROUGH'
+      );
+      if (parkingVehicles.length === 0 && this.state.exitedCount > 0) {
         this.state.phase = 'COMPLETE';
       }
     }
@@ -1624,7 +1722,6 @@ export class Simulation {
     }
 
     this.nextVehicleId = 0;
-    this.nextRoadVehicleId = 0;
     this.exitTimes = [];
 
     // Reset log
