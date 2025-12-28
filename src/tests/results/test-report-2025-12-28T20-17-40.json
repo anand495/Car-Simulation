@@ -1,0 +1,514 @@
+{
+  "timestamp": "2025-12-28T20:17:40.932Z",
+  "version": "3.4.0",
+  "summary": {
+    "totalPassed": 38,
+    "totalFailed": 6,
+    "duration": "14.8 sec"
+  },
+  "suites": [
+    {
+      "name": "Unit Tests - Pure Functions",
+      "passed": 26,
+      "failed": 0,
+      "tests": [
+        {
+          "name": "normalizeAngle: wraps 2π to 0",
+          "category": "Math Utilities",
+          "passed": true,
+          "message": "normalized angle is within tolerance: 0 ≈ 0 (±0.001)",
+          "details": {
+            "value": 0,
+            "target": 0,
+            "tolerance": 0.001,
+            "diff": 0
+          }
+        },
+        {
+          "name": "normalizeAngle: wraps -2π to 0",
+          "category": "Math Utilities",
+          "passed": true,
+          "message": "normalized angle is within tolerance: 0 ≈ 0 (±0.001)",
+          "details": {
+            "value": 0,
+            "target": 0,
+            "tolerance": 0.001,
+            "diff": 0
+          }
+        },
+        {
+          "name": "normalizeAngle: wraps 3π to π",
+          "category": "Math Utilities",
+          "passed": true,
+          "message": "normalized angle is within tolerance: 3.141592653589793 ≈ 3.141592653589793 (±0.001)",
+          "details": {
+            "value": 3.141592653589793,
+            "target": 3.141592653589793,
+            "tolerance": 0.001,
+            "diff": 0
+          }
+        },
+        {
+          "name": "normalizeAngle: keeps π/2 unchanged",
+          "category": "Math Utilities",
+          "passed": true,
+          "message": "normalized angle is within tolerance: 1.5707963267948966 ≈ 1.5707963267948966 (±0.001)",
+          "details": {
+            "value": 1.5707963267948966,
+            "target": 1.5707963267948966,
+            "tolerance": 0.001,
+            "diff": 0
+          }
+        },
+        {
+          "name": "normalizeAngle: keeps -π/2 unchanged",
+          "category": "Math Utilities",
+          "passed": true,
+          "message": "normalized angle is within tolerance: -1.5707963267948966 ≈ -1.5707963267948966 (±0.001)",
+          "details": {
+            "value": -1.5707963267948966,
+            "target": -1.5707963267948966,
+            "tolerance": 0.001,
+            "diff": 0
+          }
+        },
+        {
+          "name": "distance: calculates correctly for horizontal",
+          "category": "Math Utilities",
+          "passed": true,
+          "message": "distance is within tolerance: 10 ≈ 10 (±0.001)",
+          "details": {
+            "value": 10,
+            "target": 10,
+            "tolerance": 0.001,
+            "diff": 0
+          }
+        },
+        {
+          "name": "distance: calculates correctly for vertical",
+          "category": "Math Utilities",
+          "passed": true,
+          "message": "distance is within tolerance: 10 ≈ 10 (±0.001)",
+          "details": {
+            "value": 10,
+            "target": 10,
+            "tolerance": 0.001,
+            "diff": 0
+          }
+        },
+        {
+          "name": "distance: calculates correctly for diagonal (3-4-5)",
+          "category": "Math Utilities",
+          "passed": true,
+          "message": "distance is within tolerance: 5 ≈ 5 (±0.001)",
+          "details": {
+            "value": 5,
+            "target": 5,
+            "tolerance": 0.001,
+            "diff": 0
+          }
+        },
+        {
+          "name": "distance: returns 0 for same point",
+          "category": "Math Utilities",
+          "passed": true,
+          "message": "distance is within tolerance: 0 ≈ 0 (±0.001)",
+          "details": {
+            "value": 0,
+            "target": 0,
+            "tolerance": 0.001,
+            "diff": 0
+          }
+        },
+        {
+          "name": "CAR_LENGTH is realistic (4-5m)",
+          "category": "Constants",
+          "passed": true,
+          "message": "CAR_LENGTH = 4.5m is realistic",
+          "details": {
+            "CAR_LENGTH": 4.5
+          }
+        },
+        {
+          "name": "CAR_WIDTH is realistic (1.5-2.5m)",
+          "category": "Constants",
+          "passed": true,
+          "message": "CAR_WIDTH = 1.8m is realistic",
+          "details": {
+            "CAR_WIDTH": 1.8
+          }
+        },
+        {
+          "name": "SPEEDS.MAIN_ROAD is ~30mph (12-15 m/s)",
+          "category": "Constants",
+          "passed": true,
+          "message": "MAIN_ROAD speed = 13.4 m/s is realistic",
+          "details": {
+            "speed": 13.4,
+            "mph": 29.975800000000003
+          }
+        },
+        {
+          "name": "SPEEDS.AISLE is ~10mph (4-5 m/s)",
+          "category": "Constants",
+          "passed": true,
+          "message": "AISLE speed = 4.5 m/s is realistic",
+          "details": {
+            "speed": 4.5,
+            "mph": 10.066500000000001
+          }
+        },
+        {
+          "name": "PHYSICS.MAX_ACCELERATION is comfortable (2-3 m/s²)",
+          "category": "Constants",
+          "passed": true,
+          "message": "MAX_ACCELERATION = 2.5 m/s² is comfortable",
+          "details": {
+            "accel": 2.5
+          }
+        },
+        {
+          "name": "PHYSICS.MAX_DECELERATION is comfortable (3-5 m/s²)",
+          "category": "Constants",
+          "passed": true,
+          "message": "MAX_DECELERATION = 4 m/s² is comfortable",
+          "details": {
+            "decel": 4
+          }
+        },
+        {
+          "name": "PHYSICS.EMERGENCY_DECEL is emergency-level (7-10 m/s²)",
+          "category": "Constants",
+          "passed": true,
+          "message": "EMERGENCY_DECEL = 8 m/s² is appropriate",
+          "details": {
+            "decel": 8
+          }
+        },
+        {
+          "name": "createTestSim creates valid simulation",
+          "category": "Topology",
+          "passed": true,
+          "message": "Simulation created successfully",
+          "details": {
+            "hasTopology": true
+          }
+        },
+        {
+          "name": "Topology has correct number of spots",
+          "category": "Topology",
+          "passed": true,
+          "message": "Created 150 spots (requested 150)",
+          "details": {
+            "requested": 150,
+            "actual": 150
+          }
+        },
+        {
+          "name": "Topology has 3 lanes on main road",
+          "category": "Topology",
+          "passed": true,
+          "message": "Main road has 3 lanes",
+          "details": {
+            "lanes": 3
+          }
+        },
+        {
+          "name": "Topology has valid entry road",
+          "category": "Topology",
+          "passed": true,
+          "message": "Entry road at x=167.5, width=7",
+          "details": {
+            "x": 167.5,
+            "y": 144,
+            "width": 7
+          }
+        },
+        {
+          "name": "Topology has valid exit road",
+          "category": "Topology",
+          "passed": true,
+          "message": "Exit road at x=140, width=7",
+          "details": {
+            "x": 140,
+            "y": 144,
+            "width": 7
+          }
+        },
+        {
+          "name": "Entry and exit roads are separated",
+          "category": "Topology",
+          "passed": true,
+          "message": "Entry and exit roads separated by 27.5m",
+          "details": {
+            "entryX": 167.5,
+            "exitX": 140,
+            "separation": 27.5
+          }
+        },
+        {
+          "name": "isWithinPavedArea: center of lot is paved",
+          "category": "Paved Area",
+          "passed": true,
+          "message": "Lot center is within paved area",
+          "details": {
+            "x": 100,
+            "y": 50
+          }
+        },
+        {
+          "name": "isWithinPavedArea: main road is paved",
+          "category": "Paved Area",
+          "passed": true,
+          "message": "Main road center is within paved area",
+          "details": {
+            "x": 153.75,
+            "y": 224
+          }
+        },
+        {
+          "name": "isWithinPavedArea: far off-map is not paved",
+          "category": "Paved Area",
+          "passed": true,
+          "message": "Far off-map position correctly identified as unpaved",
+          "details": {
+            "x": -1000,
+            "y": -1000
+          }
+        },
+        {
+          "name": "isWithinPavedArea: despawn extension (x < 0) is valid",
+          "category": "Paved Area",
+          "passed": true,
+          "message": "Despawn extension zone is paved",
+          "details": {
+            "x": -20,
+            "y": 224
+          }
+        }
+      ]
+    },
+    {
+      "name": "Interaction Tests - Multi-Vehicle Behavior (High Occupancy)",
+      "passed": 12,
+      "failed": 6,
+      "tests": [
+        {
+          "name": "High traffic: vehicles maintain safe following distance",
+          "category": "Car Following",
+          "passed": false,
+          "message": "2 gap violations detected",
+          "details": {
+            "minGapRequired": 2,
+            "violations": [
+              {
+                "follower": 44,
+                "leader": 43,
+                "gap": -1.8158076397224363
+              },
+              {
+                "follower": 43,
+                "leader": 42,
+                "gap": -3.9839569682919773
+              }
+            ]
+          }
+        },
+        {
+          "name": "Dense traffic: following vehicle slows for leader",
+          "category": "Car Following",
+          "passed": true,
+          "message": "No collisions detected among 24 vehicles",
+          "details": {
+            "vehicleCount": 24,
+            "collisions": []
+          }
+        },
+        {
+          "name": "Large convoy (40 vehicles) maintains gaps",
+          "category": "Car Following",
+          "passed": true,
+          "message": "Large convoy maintains safe gaps with no collisions",
+          "details": {
+            "minGapRequired": 2,
+            "violations": [],
+            "vehicleCount": 31,
+            "collisions": []
+          }
+        },
+        {
+          "name": "Lane changes complete under heavy traffic (50 vehicles)",
+          "category": "Lane Changing",
+          "passed": true,
+          "message": "25/45 vehicles entered/entering (56%)",
+          "details": {
+            "enteredCount": 25,
+            "totalVehicles": 45,
+            "entryRate": 55.55555555555556
+          }
+        },
+        {
+          "name": "Lane change safety under congestion (60 vehicles)",
+          "category": "Lane Changing",
+          "passed": true,
+          "message": "No collisions detected among 27 vehicles",
+          "details": {
+            "vehicleCount": 27,
+            "collisions": []
+          }
+        },
+        {
+          "name": "Speed limits respected under high load (70 vehicles)",
+          "category": "Speed Compliance",
+          "passed": true,
+          "message": "All vehicles comply with speed limits",
+          "details": {
+            "violations": []
+          }
+        },
+        {
+          "name": "In-lot speed compliance (40 vehicles in lot)",
+          "category": "Speed Compliance",
+          "passed": false,
+          "message": "Only 0 vehicles in lot (expected >=5 for valid test)",
+          "details": {
+            "inLotCount": 0
+          }
+        },
+        {
+          "name": "No stuck vehicles at 80% occupancy (80/100 spots)",
+          "category": "Stuck Detection",
+          "passed": true,
+          "message": "No vehicles stuck longer than 45s",
+          "details": {
+            "maxWaitTimeAllowed": 45,
+            "stuckVehicles": []
+          }
+        },
+        {
+          "name": "Stuck resolution at 90% occupancy (90/100 spots)",
+          "category": "Stuck Detection",
+          "passed": true,
+          "message": "Final max wait time: 0.0s at 90% occupancy",
+          "details": {
+            "maxWaitTimes": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "finalMaxWait": 0,
+            "occupancy": "90%"
+          }
+        },
+        {
+          "name": "Boundary integrity at 75% occupancy",
+          "category": "Boundary Integrity",
+          "passed": true,
+          "message": "All 48 vehicles are within paved area",
+          "details": {
+            "vehicleCount": 48,
+            "offRoadVehicles": []
+          }
+        },
+        {
+          "name": "Mass exodus: 50 vehicles merge safely",
+          "category": "Merging",
+          "passed": true,
+          "message": "No collisions detected among 18 vehicles",
+          "details": {
+            "vehicleCount": 18,
+            "collisions": []
+          }
+        },
+        {
+          "name": "Merge yield under heavy traffic (60 veh/min)",
+          "category": "Merging",
+          "passed": false,
+          "message": "Exited: 4/40, Merge queue: 0 waiting, 3 merging",
+          "details": {
+            "waitingToMerge": 0,
+            "currentlyMerging": 3,
+            "exited": 4
+          }
+        },
+        {
+          "name": "Extreme stress: 100 vehicles in 120 spots",
+          "category": "Stress Test",
+          "passed": true,
+          "message": "No collisions detected among 58 vehicles",
+          "details": {
+            "vehicleCount": 58,
+            "collisions": []
+          }
+        },
+        {
+          "name": "Extreme stress: stuck rate at 90% occupancy",
+          "category": "Stress Test",
+          "passed": true,
+          "message": "Stuck rate: 0.0% (0/43) at 90% occupancy",
+          "details": {
+            "stuckCount": 0,
+            "totalVehicles": 43,
+            "stuckRate": 0,
+            "occupancy": "90%"
+          }
+        },
+        {
+          "name": "Full capacity: 100/100 spots collision-free",
+          "category": "Stress Test",
+          "passed": true,
+          "message": "No collisions at 100% occupancy (35 parked)",
+          "details": {
+            "vehicleCount": 54,
+            "collisions": [],
+            "parkedCount": 35,
+            "occupancy": "100%"
+          }
+        },
+        {
+          "name": "Acceleration limits at 60% occupancy",
+          "category": "Physics Compliance",
+          "passed": false,
+          "message": "Acceleration exceeded: accel=2.50, decel=12.00",
+          "details": {
+            "maxAccel": 2.500000000000151,
+            "maxDecel": 11.999999999999858,
+            "vehicleCount": 60
+          }
+        },
+        {
+          "name": "Full cycle: 50 vehicles park and exit (50% occupancy)",
+          "category": "Full Cycle",
+          "passed": false,
+          "message": "Parked: 18/50, Exited: 18 (100% success)",
+          "details": {
+            "parkedCount": 18,
+            "exitedCount": 18,
+            "successRate": 100
+          }
+        },
+        {
+          "name": "Full cycle: 80 vehicles (80% occupancy)",
+          "category": "Full Cycle",
+          "passed": false,
+          "message": "Parked: 34/80, Exited: 33 (97% success)",
+          "details": {
+            "parkedCount": 34,
+            "exitedCount": 33,
+            "successRate": 97.05882352941177,
+            "occupancy": "80%"
+          }
+        }
+      ]
+    }
+  ]
+}

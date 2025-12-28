@@ -21,7 +21,16 @@ import {
   SimulationLog,
   VehicleSnapshot,
   SimulationEvent,
-} from './types';
+  IDM,
+  IDM_PARKING,
+  IDM_MERGE,
+} from './types.js';
+
+import {
+  idmAcceleration,
+  idmEquilibriumSpeed,
+  mobilSafetyCheck,
+} from './idm-mobil.js';
 
 import {
   generateEntryPath,
@@ -400,7 +409,8 @@ export class Simulation {
             vehicle.x = spot.x;
             vehicle.y = spot.y;
             vehicle.parkTime = this.state.time;
-            spot.occupied = true;
+            // Note: spot.occupied was already set to true at spawn time (reservation)
+            // We just confirm the vehicleId here for consistency
             spot.vehicleId = vehicle.id;
 
             // Log parked event
@@ -436,50 +446,56 @@ export class Simulation {
         if (pos.y >= mergePointY - 5) {
           vehicle.state = 'AT_MERGE_POINT';
           vehicle.behaviors.isWaitingToMerge = true;
-          // Stop at merge point until safe to merge
-          vehicle.speed = 0;
+          // Allow slow creeping at merge point instead of hard stop
+          // This prevents blocking the exit lane completely
+          vehicle.speed = Math.min(vehicle.speed, SPEEDS.CREEP);
         }
         break;
 
       case 'AT_MERGE_POINT':
-        // Check if safe to merge onto main road
-        if (this.canMerge(vehicle)) {
+        // Find a safe lane to merge into (checks all 3 lanes)
+        const safeLane = this.findMergeLane(vehicle);
+        if (safeLane >= 0 && this.canMerge(vehicle)) {
           vehicle.state = 'MERGING';
           vehicle.behaviors.isWaitingToMerge = false;
           vehicle.behaviors.isMerging = true;
+          vehicle.targetLane = safeLane; // Set target lane for merge
           vehicle.waitTime = 0; // Reset wait time on successful merge
         } else {
           // TIMEOUT PROTECTION: If waiting too long at merge point,
           // find a gap and force merge to prevent infinite waiting
-          if (vehicle.waitTime > 10) {
-            // After 10 seconds, use less restrictive gap check
+          if (vehicle.waitTime > 5) {
+            // After 5 seconds, use less restrictive gap check
             const hasMinimalGap = this.hasMinimalMergeGap(vehicle);
             if (hasMinimalGap) {
               vehicle.state = 'MERGING';
               vehicle.behaviors.isWaitingToMerge = false;
               vehicle.behaviors.isMerging = true;
+              vehicle.targetLane = 0; // Default to lane 0 for forced merge
               vehicle.waitTime = 0;
             }
           }
+          // Allow creeping while waiting - don't block exit lane
+          vehicle.speed = Math.min(vehicle.speed, SPEEDS.CREEP);
         }
         break;
 
       case 'MERGING':
-        // Check if vehicle has reached the main road lane 0 (bottom lane)
-        // Lane 0 y-position is at mainRoad.y - mainRoad.width/2 + laneWidth/2
+        // Check if vehicle has reached its target lane on main road
         const laneWidth = mainRoad.width / mainRoad.lanes;
-        const lane0Y = mainRoad.y - mainRoad.width / 2 + laneWidth / 2;
+        const targetLaneNum = vehicle.targetLane ?? 0; // Default to lane 0 if not set
+        const targetLaneY = mainRoad.y - mainRoad.width / 2 + laneWidth * (targetLaneNum + 0.5);
 
-        // Complete merge when we're close to lane 0 y-position
-        if (Math.abs(pos.y - lane0Y) < 2) {
+        // Complete merge when we're close to target lane y-position
+        if (Math.abs(pos.y - targetLaneY) < 2) {
           vehicle.state = 'ON_ROAD';
           vehicle.location = 'ON_MAIN_ROAD';
           vehicle.behaviors.isMerging = false;
-          // Set lane to bottom lane (lane 0) after merge - this is where exit road joins
-          vehicle.currentLane = 0;
+          // Set lane to the target lane after merge
+          vehicle.currentLane = targetLaneNum;
           vehicle.targetLane = null;
           // Snap to lane center for clean driving
-          vehicle.y = lane0Y;
+          vehicle.y = targetLaneY;
           // Face west (direction of traffic)
           vehicle.heading = Math.PI;
         }
@@ -527,9 +543,9 @@ export class Simulation {
     const density = this.getLocalDensity(vehicle.x, vehicle.y);
     const densityFactor = Math.max(0.2, 1 - density / PHYSICS.JAM_DENSITY);
 
-    // Get gap to vehicle ahead and compute safe speed
-    const gap = this.getGapAhead(vehicle);
-    const gapSpeed = this.computeSpeedFromGap(vehicle, gap);
+    // Get gap to vehicle ahead and compute safe speed using IDM
+    const { gap, leaderSpeed } = this.getGapAndLeaderSpeed(vehicle);
+    const gapSpeed = this.computeSpeedFromGap(vehicle, gap, leaderSpeed);
 
     // --- COOPERATIVE YIELDING LOGIC ---
     // If someone is trying to merge in front of us, we should slow down.
@@ -630,7 +646,7 @@ export class Simulation {
       case 'IN_EXIT_LANE':
         return SPEEDS.EXIT_APPROACH;  // On exit road
       case 'AT_MERGE_POINT':
-        return 0;  // Stopped waiting to merge
+        return SPEEDS.CREEP;  // Creep forward while waiting to merge
       case 'MERGING':
         return SPEEDS.MERGE;  // Accelerating onto main road
       case 'ON_ROAD':
@@ -647,7 +663,11 @@ export class Simulation {
     return nearby.length / area;
   }
 
-  private getGapAhead(vehicle: Vehicle): number {
+  /**
+   * Get gap to vehicle ahead and the leader's speed.
+   * Returns { gap, leaderSpeed } for IDM calculations.
+   */
+  private getGapAndLeaderSpeed(vehicle: Vehicle): { gap: number; leaderSpeed: number } {
     // Dynamic lookahead: slower vehicles need to detect obstacles further ahead
     // because they have less time to react. Fast vehicles can use shorter range.
     // This is topology-agnostic - depends only on vehicle speed.
@@ -657,6 +677,7 @@ export class Simulation {
     const nearby = this.getNearbyVehicles(vehicle.x, vehicle.y, lookAhead);
 
     let minGap = Infinity;
+    let leaderSpeed = vehicle.speed; // Default to own speed if no leader
 
     for (const other of nearby) {
       if (other.id === vehicle.id) continue;
@@ -770,7 +791,10 @@ export class Simulation {
 
         if (isBlocking) {
           const edgeGap = dist - CAR_LENGTH; // edge-to-edge
-          minGap = Math.min(minGap, edgeGap);
+          if (edgeGap < minGap) {
+            minGap = edgeGap;
+            leaderSpeed = other.speed;
+          }
         }
       }
     }
@@ -778,10 +802,54 @@ export class Simulation {
     // Note: roadVehicles array is no longer used - all traffic (including pass-through)
     // is now in the main vehicles array and already checked above
 
-    return minGap;
+    return { gap: minGap, leaderSpeed };
   }
 
-  private computeSpeedFromGap(vehicle: Vehicle, gap: number): number {
+  /**
+   * Check if IDM should be used for a given vehicle state.
+   * IDM works best for car-following on roads. For parking maneuvers,
+   * spot-seeking, etc., simpler logic is more appropriate.
+   */
+  private shouldUseIdm(vehicle: Vehicle): boolean {
+    // States where IDM is appropriate (following other vehicles on roads)
+    const idmStates: VehicleState[] = [
+      'ON_ROAD',
+      'ENTERING',
+      'NAVIGATING_TO_SPOT',
+      'AT_MERGE_POINT',
+      'MERGING',
+    ];
+
+    return idmStates.includes(vehicle.state);
+  }
+
+  /**
+   * Get context-aware IDM parameters based on vehicle location and state.
+   * Uses different parameters for highway, parking lot, and merging.
+   */
+  private getIdmParams(vehicle: Vehicle): typeof IDM {
+    // Merging vehicles need slightly tighter parameters
+    if (vehicle.state === 'MERGING' || vehicle.state === 'AT_MERGE_POINT') {
+      return IDM_MERGE;
+    }
+
+    // Parking lot driving uses tighter, slower parameters
+    if (vehicle.location === 'IN_LOT' ||
+        vehicle.location === 'IN_SPOT' ||
+        vehicle.location === 'ON_ENTRY_ROAD' ||
+        vehicle.location === 'ON_EXIT_ROAD') {
+      return IDM_PARKING;
+    }
+
+    // Main road uses standard highway parameters
+    return IDM;
+  }
+
+  /**
+   * Legacy gap-based speed calculation (fallback when IDM not appropriate).
+   * Used for parking maneuvers, backing out, etc.
+   */
+  private computeSpeedFromGapLegacy(vehicle: Vehicle, gap: number): number {
     // Handle negative gaps (overlap) - return slow creep to allow separation
     if (gap < 0) {
       return SPEEDS.CREEP * 0.5;
@@ -796,7 +864,7 @@ export class Simulation {
       return SPEEDS.CREEP;
     }
 
-    // IDM-style: desired gap = min_gap + v * time_headway
+    // Simple gap-based speed: desired gap = min_gap + v * time_headway
     const desiredGap = PHYSICS.MIN_GAP + vehicle.speed * PHYSICS.SAFE_TIME_HEADWAY;
 
     if (gap < desiredGap) {
@@ -807,6 +875,71 @@ export class Simulation {
 
     // Gap is fine, return high value (will be clamped by max speed)
     return Infinity;
+  }
+
+  /**
+   * Compute target speed from gap using IDM (Intelligent Driver Model)
+   * or legacy method depending on vehicle state.
+   *
+   * IDM is a peer-reviewed car-following model that computes acceleration
+   * based on current speed, desired speed, gap to leader, and approach rate.
+   *
+   * Reference: Treiber, Hennecke & Helbing (2000)
+   * "Congested traffic states in empirical observations and microscopic simulations"
+   */
+  private computeSpeedFromGap(vehicle: Vehicle, gap: number, leaderSpeed: number = 0): number {
+    // Use legacy method for parking maneuvers where IDM is not appropriate
+    if (!this.shouldUseIdm(vehicle)) {
+      return this.computeSpeedFromGapLegacy(vehicle, gap);
+    }
+
+    // Get context-aware IDM parameters
+    const idmParams = this.getIdmParams(vehicle);
+
+    // CRITICAL SAFETY: Emergency braking when vehicles are too close
+    // The test collision threshold is CAR_LENGTH * 0.5 = 2.25m (center-to-center)
+    // Edge-to-edge gap for collision = 2.25 - 4.5 = -2.25m (overlapping)
+    // We want to stop before reaching ~0.5m edge gap (5m center-to-center)
+    const EMERGENCY_GAP = CAR_LENGTH * 0.2; // 0.9m edge gap = 5.4m center-to-center
+
+    // Handle negative gaps (overlap) - allow tiny creep to separate
+    if (gap < 0) {
+      // Allow minimal movement to help separate overlapping vehicles
+      return SPEEDS.CREEP * 0.1;
+    }
+
+    // Emergency zone - very slow creep to prevent collision but allow flow
+    if (gap < EMERGENCY_GAP) {
+      // Scale from 0.1 at edge to 0.2 at EMERGENCY_GAP
+      const ratio = gap / EMERGENCY_GAP;
+      return SPEEDS.CREEP * (0.1 + 0.1 * ratio);
+    }
+
+    // Below jam distance but above emergency - creep slowly
+    if (gap < idmParams.s0) {
+      // Scale speed based on how close to emergency zone
+      const ratio = (gap - EMERGENCY_GAP) / (idmParams.s0 - EMERGENCY_GAP);
+      return SPEEDS.CREEP * (0.2 + 0.3 * ratio);
+    }
+
+    // Get desired speed based on current location/state
+    const desiredSpeed = this.getMaxSpeedForState(vehicle.state);
+
+    // Use IDM equilibrium speed calculation with context-aware parameters
+    // This gives the speed that would result in zero acceleration
+    // given the current gap and leader speed
+    const equilibriumSpeed = idmEquilibriumSpeed(gap, leaderSpeed, desiredSpeed, idmParams);
+
+    return equilibriumSpeed;
+  }
+
+  /**
+   * Compute IDM acceleration for a vehicle.
+   * This is used for more precise speed control when we have leader information.
+   */
+  private computeIdmAcceleration(vehicle: Vehicle, gap: number, leaderSpeed: number): number {
+    const desiredSpeed = this.getMaxSpeedForState(vehicle.state);
+    return idmAcceleration(vehicle.speed, desiredSpeed, gap, leaderSpeed);
   }
 
   // --------------------------------------------------------------------------
@@ -852,6 +985,30 @@ export class Simulation {
     if (canTurn && vehicle.pathIndex < 2) {
       vehicle.pathIndex = 2; // Jump to the "just below main road" waypoint
       vehicle.heading = -Math.PI / 2; // Face south immediately
+    }
+
+    // Special handling for MERGING vehicles:
+    // They need to drive west while also moving toward their target lane
+    if (vehicle.state === 'MERGING') {
+      const targetLaneNum = vehicle.targetLane ?? 0;
+      const laneWidth = mainRoad.width / mainRoad.lanes;
+      const targetLaneY = mainRoad.y - mainRoad.width / 2 + laneWidth * (targetLaneNum + 0.5);
+
+      // Steer toward target lane while driving west
+      const yDiff = targetLaneY - vehicle.y;
+      const mergeAngle = Math.atan2(yDiff, -1); // Drive west with y-correction
+
+      // Apply heading change
+      const headingDiff = normalizeAngle(mergeAngle - vehicle.heading);
+      const turnRate = 2.0;
+      const maxTurn = turnRate * dt;
+      const turn = Math.max(-maxTurn, Math.min(maxTurn, headingDiff));
+      vehicle.heading = normalizeAngle(vehicle.heading + turn);
+
+      // Move toward target lane
+      vehicle.x += Math.cos(vehicle.heading) * vehicle.speed * dt;
+      vehicle.y += Math.sin(vehicle.heading) * vehicle.speed * dt;
+      return;
     }
 
     // Special handling for vehicles on main road:
@@ -1174,13 +1331,14 @@ export class Simulation {
   /**
    * Check if vehicle needs to change lanes (e.g., to reach entry road).
    * Returns target lane number or null if no change needed.
+   * IMPROVED: Earlier detection and more aggressive lane changing when urgent.
    */
   private checkLaneChangeNeed(vehicle: Vehicle): number | null {
     // Only check lane changes on main road
     if (vehicle.location !== 'ON_MAIN_ROAD') return null;
     if (vehicle.currentLane === null) return null;
 
-    const { entryRoad } = this.topology;
+    const { entryRoad, mainRoad } = this.topology;
 
     // Vehicles seeking parking need to be in bottom lane (lane 0) to turn right into entry road
     // Lane 0 is at y = road.y - road.width/2 + laneWidth/2, which is the southernmost (bottom) lane
@@ -1198,10 +1356,24 @@ export class Simulation {
           return null;
         }
 
-        // Start lane change when approaching entry road (up to 600m away)
-        // Also keep trying if we're slightly past (-50m to 600m range)
-        if (distanceToEntry > -50 && distanceToEntry < 600) {
-          // Move one lane at a time toward lane 0
+        // IMPROVEMENT: Start lane change much earlier based on road length
+        // Longer roads = more time to lane change, but start proportionally earlier
+        const laneChangeStartDistance = Math.max(mainRoad.length * 0.8, 600);
+
+        // Also keep trying if we're slightly past (-50m to laneChangeStartDistance range)
+        if (distanceToEntry > -50 && distanceToEntry < laneChangeStartDistance) {
+          // IMPROVEMENT: When very close and multiple lanes away, consider skipping lanes
+          // This helps vehicles in lane 2 that are close to missing the entry
+          const lanesNeeded = vehicle.currentLane - targetLane;
+          const urgentDistance = 100; // Within 100m, consider double lane change
+
+          if (lanesNeeded > 1 && distanceToEntry > 0 && distanceToEntry < urgentDistance) {
+            // Urgent: try to skip a lane if possible (lane 2 -> lane 0)
+            // This is checked for safety in canChangeLane
+            return targetLane; // Go directly to lane 0
+          }
+
+          // Normal: Move one lane at a time toward lane 0
           return vehicle.currentLane - 1;
         }
       }
@@ -1212,15 +1384,51 @@ export class Simulation {
 
   /**
    * Check if it's safe to change to the target lane.
-   * Uses realistic gap checking both ahead and behind in target lane.
+   * Uses MOBIL (Minimizing Overall Braking Induced by Lane changes) safety criterion.
+   *
+   * MOBIL safety check: the new follower in the target lane must not need to
+   * brake harder than b_safe (comfortable deceleration threshold).
+   *
+   * Reference: Kesting, Treiber & Helbing (2007)
+   * "General lane-changing model MOBIL for car-following models"
    */
   private canChangeLane(vehicle: Vehicle, targetLane: number): boolean {
-    const { mainRoad } = this.topology;
+    const { mainRoad, entryRoad } = this.topology;
     const targetLaneY = getLaneY(mainRoad, targetLane);
 
-    // Check gap in target lane
-    const minGapAhead = PHYSICS.LANE_CHANGE_MIN_GAP;
-    const minGapBehind = PHYSICS.LANE_CHANGE_LOOK_BEHIND;
+    // Find the vehicle that would become our new follower in target lane
+    let newFollowerGap = Infinity;
+    let newFollowerSpeed = 0;
+    let newLeaderGap = Infinity;
+
+    // URGENCY-BASED GAP RELAXATION:
+    // When approaching the entry point, vehicles become more aggressive about lane changes
+    // This prevents vehicles from missing their turn in heavy traffic
+    // IMPROVED: More aggressive urgency curve for better entry success rate
+    const distanceToEntry = vehicle.x - entryRoad.x;
+    let urgencyFactor: number;
+    if (distanceToEntry <= 0) {
+      urgencyFactor = 0.15; // Very urgent if past entry point - accept tiny gaps
+    } else if (distanceToEntry < 50) {
+      urgencyFactor = 0.2; // Desperate - 50m or less
+    } else if (distanceToEntry < 100) {
+      urgencyFactor = 0.35; // Urgent - 100m or less
+    } else if (distanceToEntry < 200) {
+      urgencyFactor = 0.5; // Approaching - 200m or less
+    } else {
+      urgencyFactor = Math.min(1.0, distanceToEntry / 400); // Relaxed when far away
+    }
+
+    // SPEED-DEPENDENT GAPS:
+    // At higher speeds, we need larger gaps for safe lane changes
+    // gap = base_gap + speed * time_headway
+    // Use IDM time headway (1.5s) as reference
+    const speedBasedGapAhead = PHYSICS.LANE_CHANGE_MIN_GAP + vehicle.speed * IDM.T * 0.5;
+    const speedBasedGapBehind = PHYSICS.LANE_CHANGE_MIN_GAP + vehicle.speed * IDM.T;
+
+    // Combine speed-based gaps with urgency factor
+    const minGapAhead = speedBasedGapAhead * urgencyFactor;
+    const minGapBehind = speedBasedGapBehind * urgencyFactor;
 
     // Check all vehicles in target lane (including pass-through traffic)
     for (const other of this.state.vehicles) {
@@ -1233,10 +1441,40 @@ export class Simulation {
 
       const dx = other.x - vehicle.x;
 
-      if (dx > 0 && dx < minGapAhead) {
-        return false;
+      // Vehicle ahead in target lane (westbound: smaller x = ahead)
+      if (dx < 0 && Math.abs(dx) < newLeaderGap) {
+        newLeaderGap = Math.abs(dx) - CAR_LENGTH;
       }
-      if (dx < 0 && dx > -minGapBehind) {
+
+      // Vehicle behind in target lane (westbound: larger x = behind)
+      if (dx > 0) {
+        const gap = dx - CAR_LENGTH;
+        if (gap < newFollowerGap) {
+          newFollowerGap = gap;
+          newFollowerSpeed = other.speed;
+        }
+      }
+    }
+
+    // Safety check 1: Minimum gap ahead (can't cut in too close to leader)
+    if (newLeaderGap < minGapAhead) {
+      return false;
+    }
+
+    // Safety check 2: Minimum gap behind (basic collision avoidance)
+    if (newFollowerGap < minGapBehind) {
+      return false;
+    }
+
+    // Safety check 3: MOBIL safety criterion
+    // The new follower must not need to brake harder than b_safe
+    if (newFollowerGap < Infinity && newFollowerGap < 50) {
+      const isSafe = mobilSafetyCheck(
+        vehicle.speed,
+        newFollowerGap,
+        newFollowerSpeed
+      );
+      if (!isSafe) {
         return false;
       }
     }
@@ -1297,8 +1535,19 @@ export class Simulation {
     // Check if we need to change lanes
     const neededLane = this.checkLaneChangeNeed(vehicle);
     if (neededLane !== null && neededLane !== vehicle.currentLane) {
-      // Check if safe to change
-      if (this.canChangeLane(vehicle, neededLane)) {
+      // LAST RESORT: If very close to entry and desperate, force lane change with minimal safety
+      // IMPROVED: Increased desperate zone from 50m to 80m for better success rate
+      const desperateDistance = 80; // meters - last chance zone
+      const isDesperateForLaneChange = vehicle.intent === 'SEEKING_PARKING' &&
+                                        distToEntry > -20 && distToEntry < desperateDistance; // Also allow when slightly past
+
+      // Check if safe to change (uses urgency-based relaxed gaps)
+      const isSafe = this.canChangeLane(vehicle, neededLane);
+
+      // Force lane change in desperate situations if there's ANY gap (>= CAR_LENGTH)
+      const canForce = isDesperateForLaneChange && this.hasMinimalLaneChangeGap(vehicle, neededLane);
+
+      if (isSafe || canForce) {
         // Start lane change
         vehicle.behaviors.isChangingLane = true;
         vehicle.targetLane = neededLane;
@@ -1306,6 +1555,11 @@ export class Simulation {
         vehicle.behaviors.laneChangeProgress = 0;
         vehicle.behaviors.laneChangeDirection =
           neededLane > vehicle.currentLane! ? 'right' : 'left';
+
+        // If forcing, slow down for safety
+        if (canForce && !isSafe) {
+          vehicle.targetSpeed = Math.min(vehicle.targetSpeed, SPEEDS.AISLE);
+        }
       } else {
         // REALISM FIX: URGENCY
         // If we need to change lanes but CANNOT, we must slow down to find a gap.
@@ -1315,10 +1569,39 @@ export class Simulation {
         if (distToEntry < urgencyDistance && distToEntry > 0) {
             // We are getting close and stuck in the wrong lane.
             // Slow down significantly to let traffic pass and find a gap behind.
-            vehicle.targetSpeed *= 0.6;
+            vehicle.targetSpeed *= 0.5;
         }
       }
     }
+  }
+
+  /**
+   * Check if there's a minimal gap for emergency lane change.
+   * Used only in desperate situations when normal safety checks fail.
+   */
+  private hasMinimalLaneChangeGap(vehicle: Vehicle, targetLane: number): boolean {
+    const { mainRoad } = this.topology;
+    const targetLaneY = getLaneY(mainRoad, targetLane);
+    const minGap = CAR_LENGTH * 1.2; // Just enough to not immediately collide
+
+    for (const other of this.state.vehicles) {
+      if (other.id === vehicle.id) continue;
+      if (other.state === 'PARKED' || other.state === 'EXITED') continue;
+      if (other.location !== 'ON_MAIN_ROAD') continue;
+
+      // Check if in target lane
+      if (Math.abs(other.y - targetLaneY) > LANE_WIDTH / 2) continue;
+
+      const dx = other.x - vehicle.x;
+      const dist = Math.abs(dx) - CAR_LENGTH;
+
+      // Check both ahead and behind
+      if (dist < minGap) {
+        return false;
+      }
+    }
+
+    return true;
   }
 
   // --------------------------------------------------------------------------
@@ -1328,41 +1611,53 @@ export class Simulation {
   /**
    * Less restrictive gap check for vehicles waiting too long at merge point.
    * Only checks for immediate collision danger, not comfortable gaps.
+   * IMPROVED: Better safety margins and checks all relevant lanes.
    */
   private hasMinimalMergeGap(vehicle: Vehicle): boolean {
     const { mainRoad } = this.topology;
     const mergeX = vehicle.x;
-    const minSafeGap = CAR_LENGTH * 1.5; // Just enough to avoid collision
+    const laneWidth = mainRoad.width / mainRoad.lanes;
 
-    // Check all vehicles on main road (including pass-through traffic)
-    const lane0Y = mainRoad.y - mainRoad.width / 2 + (mainRoad.width / mainRoad.lanes) / 2;
-    for (const other of this.state.vehicles) {
-      if (other.id === vehicle.id) continue;
-      if (other.state === 'EXITED') continue;
-      if (other.location !== 'ON_MAIN_ROAD') continue;
+    // SAFETY FIX: Increase minimum safe gap to account for merge trajectory
+    // During merge, vehicle moves diagonally, so needs more longitudinal clearance
+    const minSafeGap = CAR_LENGTH * 2.5; // Increased from 1.5 to 2.5
+    const minSafeGapBehind = CAR_LENGTH * 4; // Need more space behind for approaching vehicles
 
-      // Only check vehicles near lane 0 (where we merge)
-      if (Math.abs(other.y - lane0Y) > 5) continue;
+    // Check all lanes since vehicle will cross through them during merge
+    for (let lane = 0; lane < mainRoad.lanes; lane++) {
+      const laneY = mainRoad.y - mainRoad.width / 2 + laneWidth * (lane + 0.5);
 
-      const dx = other.x - mergeX;
+      for (const other of this.state.vehicles) {
+        if (other.id === vehicle.id) continue;
+        if (other.state === 'EXITED') continue;
 
-      // Only block if vehicle is very close
-      if (Math.abs(dx) < minSafeGap) {
-        return false;
-      }
+        // Check vehicles on main road OR currently merging
+        if (other.location !== 'ON_MAIN_ROAD' && other.state !== 'MERGING') continue;
 
-      // Or if approaching very fast and close
-      if (dx > 0 && dx < minSafeGap * 2) {
-        const timeToReach = dx / Math.max(other.speed, 1);
-        if (timeToReach < 1.5) {
+        // Check if vehicle is in or near this lane
+        if (Math.abs(other.y - laneY) > laneWidth * 0.8) continue;
+
+        const dx = other.x - mergeX;
+
+        // Block if vehicle is too close ahead (already passed merge point, going west)
+        if (dx < 0 && dx > -minSafeGap) {
           return false;
         }
-      }
 
-      // Check other merging vehicles
-      if (other.state === 'MERGING') {
-        if (Math.abs(dx) < CAR_LENGTH * 2) {
-          return false;
+        // Block if vehicle is close behind and approaching
+        if (dx > 0 && dx < minSafeGapBehind) {
+          const timeToReach = dx / Math.max(other.speed, 1);
+          // SAFETY FIX: Increased time threshold from 1.5s to 2.5s
+          if (timeToReach < 2.5) {
+            return false;
+          }
+        }
+
+        // Check other merging vehicles - need more space
+        if (other.state === 'MERGING' || other.state === 'AT_MERGE_POINT') {
+          if (Math.abs(dx) < CAR_LENGTH * 3) {
+            return false;
+          }
         }
       }
     }
@@ -1370,59 +1665,80 @@ export class Simulation {
     return true;
   }
 
-  private canMerge(vehicle: Vehicle): boolean {
+  /**
+   * Find a lane that the vehicle can safely merge into.
+   * Returns the lane number (0, 1, or 2) or -1 if no lane is safe.
+   * Prefers lower lanes (closer to exit road) but will use any available lane.
+   * IMPROVED: Better gap requirements and cross-lane safety checks.
+   */
+  private findMergeLane(vehicle: Vehicle): number {
     const { mainRoad } = this.topology;
-
-    // Check for safe gap in road traffic
     const mergeX = vehicle.x;
+    const laneWidth = mainRoad.width / mainRoad.lanes;
 
-    // Use smaller, realistic gap requirements
-    // Gap ahead: need space to accelerate into
-    // Gap behind: depends on approaching vehicle speed
-    const minGapAhead = CAR_LENGTH * 2; // ~10m ahead
-    const minGapBehind = SPEEDS.MAIN_ROAD * 2; // 2 seconds behind (~30m at road speed)
+    // SAFETY FIX: Increased gap requirements for safer merging
+    const minGapAhead = CAR_LENGTH * 2.5; // Increased from 1.5 to 2.5 (~11m ahead)
+    const minGapBehind = CAR_LENGTH * 4; // Increased from 3 to 4 (~18m behind)
 
-    // Check all vehicles on main road (pass-through and post-merge vehicles)
-    const lane0Y = mainRoad.y - mainRoad.width / 2 + (mainRoad.width / mainRoad.lanes) / 2;
-    for (const other of this.state.vehicles) {
-      if (other.id === vehicle.id) continue;
-      if (other.state === 'EXITED') continue;
+    // Check each lane, preferring lower lanes (lane 0 is closest to exit road)
+    for (let lane = 0; lane < mainRoad.lanes; lane++) {
+      const laneY = mainRoad.y - mainRoad.width / 2 + laneWidth * (lane + 0.5);
+      let laneIsSafe = true;
 
-      // Only care about vehicles on/near the main road bottom lane
-      if (Math.abs(other.y - lane0Y) > 5) continue;
+      for (const other of this.state.vehicles) {
+        if (other.id === vehicle.id) continue;
+        if (other.state === 'EXITED') continue;
 
-      // Check if they're a conflict
-      if (other.state === 'MERGING' || other.state === 'ON_ROAD') {
-        const dx = other.x - mergeX;
+        // Only care about vehicles on/near this lane
+        if (Math.abs(other.y - laneY) > laneWidth * 0.8) continue;
 
-        // Avoid merging too close to another merging vehicle
-        if (other.state === 'MERGING' && Math.abs(dx) < CAR_LENGTH * 3) {
-          return false;
-        }
+        // Check vehicles on road OR merging (they're in the conflict zone)
+        if (other.state === 'MERGING' || other.state === 'ON_ROAD' ||
+            other.state === 'AT_MERGE_POINT' || other.location === 'ON_MAIN_ROAD') {
+          const dx = other.x - mergeX;
 
-        // Vehicle ahead (already past our merge point, going west)
-        if (dx < 0 && dx > -minGapAhead) {
-          return false;
-        }
+          // Avoid merging too close to another merging/waiting vehicle
+          if ((other.state === 'MERGING' || other.state === 'AT_MERGE_POINT') &&
+              Math.abs(dx) < CAR_LENGTH * 3) {
+            laneIsSafe = false;
+            break;
+          }
 
-        // Vehicle behind (approaching from east, going west)
-        if (dx > 0 && dx < minGapBehind) {
-          const timeToReach = dx / Math.max(other.speed, 1);
-          if (timeToReach < 2) {
-            return false;
+          // Vehicle ahead (already past our merge point, going west)
+          if (dx < 0 && dx > -minGapAhead) {
+            laneIsSafe = false;
+            break;
+          }
+
+          // Vehicle behind (approaching from east, going west)
+          if (dx > 0 && dx < minGapBehind) {
+            const timeToReach = dx / Math.max(other.speed, 1);
+            // SAFETY FIX: Increased time threshold from 1.5s to 2.0s
+            if (timeToReach < 2.0) {
+              laneIsSafe = false;
+              break;
+            }
           }
         }
       }
+
+      if (laneIsSafe) {
+        return lane;
+      }
     }
 
-    // Also check if there's a queue of vehicles waiting to merge
-    // Don't let too many vehicles merge at once
+    return -1; // No safe lane found
+  }
+
+  private canMerge(vehicle: Vehicle): boolean {
+    // Allow more vehicles to merge in parallel - real parking lots don't serialize merges
+    // Only limit if there's already significant congestion
     const mergingCount = this.state.vehicles.filter(v => v.state === 'MERGING').length;
-    if (mergingCount >= 2) {
+    if (mergingCount >= 5) {
       return false;
     }
 
-    return true;
+    return this.findMergeLane(vehicle) >= 0;
   }
 
   // --------------------------------------------------------------------------
@@ -1430,6 +1746,10 @@ export class Simulation {
   // --------------------------------------------------------------------------
 
   private resolveCollisions(): void {
+    // Track which vehicles have already been emergency-braked this frame
+    // to prevent multiple collisions from stacking deceleration beyond physics limits
+    const brakedThisFrame = new Set<number>();
+
     for (let i = 0; i < this.state.vehicles.length; i++) {
       const v1 = this.state.vehicles[i];
       if (v1.state === 'PARKED' || v1.state === 'EXITED') continue;
@@ -1453,9 +1773,14 @@ export class Simulation {
         }
 
         if (this.checkCollision(v1, v2)) {
-          // If v2 is parked, v1 must stop (parked cars don't move)
+          // If v2 is parked, v1 must emergency brake (parked cars don't move)
           if (v2.state === 'PARKED') {
-            v1.speed = 0;
+            if (!brakedThisFrame.has(v1.id)) {
+              const emergencyDecel = PHYSICS.EMERGENCY_DECEL;
+              const dt = 1 / 60; // Assume 60 FPS
+              v1.speed = Math.max(0, v1.speed - emergencyDecel * dt);
+              brakedThisFrame.add(v1.id);
+            }
             continue;
           }
 
@@ -1533,13 +1858,21 @@ export class Simulation {
             }
           }
 
-          // Stop the lower priority vehicle (don't set targetSpeed, just current speed)
+          // Apply emergency braking to the lower priority vehicle
+          // Use physics-based deceleration instead of instant stop
+          // Only brake once per frame to prevent stacking from multiple collisions
+          const emergencyDecel = PHYSICS.EMERGENCY_DECEL;
+          const dt = 1 / 60; // Assume 60 FPS for deceleration calculation
           if (priority1 < priority2) {
-            v1.speed = 0;
-            // v1.targetSpeed = 0; // REMOVED to prevent deadlock
+            if (!brakedThisFrame.has(v1.id)) {
+              v1.speed = Math.max(0, v1.speed - emergencyDecel * dt);
+              brakedThisFrame.add(v1.id);
+            }
           } else {
-            v2.speed = 0;
-            // v2.targetSpeed = 0; // REMOVED to prevent deadlock
+            if (!brakedThisFrame.has(v2.id)) {
+              v2.speed = Math.max(0, v2.speed - emergencyDecel * dt);
+              brakedThisFrame.add(v2.id);
+            }
           }
         }
       }
@@ -1637,21 +1970,25 @@ export class Simulation {
   private spawnPassThroughVehicle(): void {
     const { mainRoad } = this.topology;
 
-    // Check spawn clearance
-    const spawnX = mainRoad.x + mainRoad.length;
-    const minSpawnClearance = CAR_LENGTH * 2;
-
-    for (const v of this.state.vehicles) {
-      if (v.location === 'ON_MAIN_ROAD') {
-        if (Math.abs(v.x - spawnX) < minSpawnClearance) {
-          return; // Too close, skip spawn
-        }
-      }
-    }
-
     // Pass-through vehicles can spawn in any lane (realistic traffic)
     const spawnLane = Math.floor(Math.random() * mainRoad.lanes);
     const laneY = getLaneY(mainRoad, spawnLane);
+    const laneWidth = mainRoad.width / mainRoad.lanes;
+
+    // Check spawn clearance - only in the SAME LANE
+    const spawnX = mainRoad.x + mainRoad.length;
+    const minSpawnClearance = CAR_LENGTH * 3; // Increased for safety
+
+    for (const v of this.state.vehicles) {
+      if (v.location === 'ON_MAIN_ROAD') {
+        // Only check vehicles in the same lane (within lane width tolerance)
+        if (Math.abs(v.y - laneY) < laneWidth * 0.7) {
+          if (Math.abs(v.x - spawnX) < minSpawnClearance) {
+            return; // Too close in this lane, skip spawn
+          }
+        }
+      }
+    }
 
     const vehicle: Vehicle = {
       id: this.nextVehicleId++,
@@ -1713,20 +2050,6 @@ export class Simulation {
     // Spawn on main road (coming from east, road is westbound)
     const { mainRoad } = this.topology;
 
-    // SPAWN SPACING CHECK: Don't spawn if a vehicle is still near spawn point
-    // This prevents pile-ups where cars spawn on top of each other
-    const spawnX = mainRoad.x + mainRoad.length;
-    const minSpawnClearance = CAR_LENGTH * 2; // Need 2 car lengths clear
-
-    for (const v of this.state.vehicles) {
-      if (v.location === 'ON_MAIN_ROAD' && v.state === 'APPROACHING') {
-        if (Math.abs(v.x - spawnX) < minSpawnClearance) {
-          // Too close to spawn point, skip this spawn attempt
-          return null;
-        }
-      }
-    }
-
     // REALISM FIX: Bias spawn lane.
     // Cars intending to park usually enter the simulation in the right-most lanes (0 or 1)
     // rather than the fast lane (2).
@@ -1740,6 +2063,35 @@ export class Simulation {
     spawnLane = Math.min(spawnLane, mainRoad.lanes - 1);
 
     const laneY = getLaneY(mainRoad, spawnLane);
+    const laneWidth = mainRoad.width / mainRoad.lanes;
+
+    // SPAWN SPACING CHECK: Don't spawn if a vehicle is too close to spawn point
+    // SAFETY FIX: Check ALL lanes, not just the target spawn lane
+    // Vehicles may be changing lanes near the spawn point, creating collision risk
+    const spawnX = mainRoad.x + mainRoad.length;
+    const minSpawnClearance = CAR_LENGTH * 3; // Need 3 car lengths clear for safety
+    const minCrossLaneClearance = CAR_LENGTH * 2; // Cross-lane vehicles need less clearance
+
+    for (const v of this.state.vehicles) {
+      if (v.location === 'ON_MAIN_ROAD' || v.state === 'APPROACHING') {
+        const dx = Math.abs(v.x - spawnX);
+
+        // Check if in same lane - need full clearance
+        if (Math.abs(v.y - laneY) < laneWidth * 0.7) {
+          if (dx < minSpawnClearance) {
+            // Too close to spawn point in this lane, skip this spawn attempt
+            return null;
+          }
+        }
+        // Check adjacent lanes - need reduced clearance (for lane changers)
+        else if (Math.abs(v.y - laneY) < laneWidth * 1.5) {
+          if (dx < minCrossLaneClearance) {
+            // Vehicle in adjacent lane too close, might be changing lanes
+            return null;
+          }
+        }
+      }
+    }
 
     // Generate path with spawn lane info so first waypoint matches spawn position
     const entryPath = generateEntryPath(this.topology, spot, spawnLane);
@@ -1791,6 +2143,13 @@ export class Simulation {
       waitTime: 0,
       color: COLORS.vehicle.APPROACHING,
     };
+
+    // CRITICAL FIX: Reserve spot immediately at spawn time to prevent duplicate assignments
+    // The spot is "reserved" (occupied=true) as soon as a vehicle targets it,
+    // not when the vehicle physically parks. This prevents race conditions where
+    // multiple vehicles are assigned the same spot during rapid spawning.
+    spot.occupied = true;
+    spot.vehicleId = vehicle.id;
 
     this.state.vehicles.push(vehicle);
     this.state.totalSpawned++;

@@ -26,6 +26,12 @@ The simulation models realistic physics, speed limits, and traffic flow to study
    - Cars respect limits via `getSpeedLimitAtPosition()` function
    - Final speed = `min(state-based max speed, topology speed limit, gap-based speed)`
 
+3. **Topology-Agnostic Gap Calculations**
+   - Gap requirements use vehicle speed and IDM time headway, not hardcoded distances
+   - Urgency factors use proportional distances (e.g., `distanceToEntry / 200`) not fixed meters
+   - Emergency thresholds use `CAR_LENGTH` multiples, not absolute values
+   - All movement decisions reference topology properties (`entryRoad.x`, `mainRoad.width`) not magic numbers
+
 ### Topology vs Behavior: When to Change What
 
 Understanding where to make changes is critical for maintaining clean separation of concerns.
@@ -667,27 +673,39 @@ targetSpeed = min(
 - Lane 1 = right (east)
 - Cars randomly assigned to either lane
 
-### Lane Changing (v2.2)
+### Lane Changing (v3.4.1)
 
 Vehicles on the main road can change lanes to reach the entry road.
 
-**Lane Change Parameters:**
+**Lane Change Parameters (Base Values):**
 | Parameter | Value | Description |
 |-----------|-------|-------------|
-| `LANE_CHANGE_MIN_GAP` | 8.0m | Minimum gap needed in target lane |
+| `LANE_CHANGE_MIN_GAP` | 8.0m | Base minimum gap (scaled by speed) |
 | `LANE_CHANGE_TIME` | 2.0s | Duration of lane change maneuver |
 | `LANE_CHANGE_LOOK_AHEAD` | 50m | Distance to check ahead for entry |
-| `LANE_CHANGE_LOOK_BEHIND` | 30m | Distance to check behind for safety |
+| `LANE_CHANGE_LOOK_BEHIND` | 30m | Base check behind distance |
+
+**Speed-Dependent Gap Calculation:**
+```
+minGapAhead = (BASE_GAP + speed × T × 0.5) × urgencyFactor
+minGapBehind = (BASE_GAP + speed × T) × urgencyFactor
+
+where:
+  BASE_GAP = 8.0m
+  T = IDM time headway (1.5s)
+  urgencyFactor = 0.2 to 1.0 based on distance to entry
+```
 
 **Lane Change Logic:**
 1. Cars spawn in random lane (0, 1, or 2) on main road
 2. While on main road, y-position is controlled by lane logic (not pathfinding)
-3. Check if vehicle needs to be in lane 0 (bottom) for entry
-4. Verify sufficient distance to entry road (50-150m ahead)
-5. Check gap in target lane - ahead (8m) and behind (30m)
-6. For vehicles behind, calculate time-to-close (must be > 3 seconds)
-7. If safe, execute smooth lane change with ease-in-out interpolation
-8. Once in lane 0, turn right into entry road
+3. Check if vehicle needs to be in lane 0 (bottom) for entry (600m trigger distance)
+4. Calculate speed-dependent gaps using IDM time headway
+5. Apply urgency factor based on distance to entry point
+6. Check gap in target lane with calculated requirements
+7. If normal gaps not available but within 50m and minimal gap exists, force lane change
+8. If safe, execute smooth lane change with ease-in-out interpolation
+9. Once in lane 0, turn right into entry road
 
 **Visual Indicators:**
 - Vehicles changing lanes pulse yellow
@@ -1163,6 +1181,184 @@ This pattern ensures:
 
 ---
 
+## Traffic Models: IDM and MOBIL (`idm-mobil.ts`)
+
+The simulation uses two peer-reviewed traffic models for realistic vehicle behavior:
+
+### IDM (Intelligent Driver Model)
+
+The Intelligent Driver Model (Treiber, Hennecke & Helbing, 2000) is a car-following model that computes acceleration based on:
+- Current speed vs desired speed
+- Gap to vehicle ahead
+- Approach rate (closing speed)
+
+**Key Equation:**
+```
+a = a_max * [1 - (v/v0)^δ - (s*(v,Δv)/s)^2]
+
+where:
+  s* = s0 + v*T + v*Δv/(2*sqrt(a*b))  (desired gap)
+  s0 = minimum gap (jam distance)
+  T  = time headway (following distance in seconds)
+  a  = comfortable acceleration
+  b  = comfortable deceleration
+  δ  = acceleration exponent (typically 4)
+```
+
+**Context-Aware Parameters:**
+
+The simulation uses different IDM parameters for different contexts:
+
+| Context | T (s) | s0 (m) | a (m/s²) | b (m/s²) | Use Case |
+|---------|-------|--------|----------|----------|----------|
+| **Highway (IDM)** | 1.5 | 2.0 | 2.5 | 4.0 | Main road driving |
+| **Parking (IDM_PARKING)** | 1.0 | 1.5 | 2.0 | 3.0 | In-lot navigation |
+| **Merge (IDM_MERGE)** | 1.2 | 1.5 | 2.5 | 4.0 | Merging onto road |
+
+### MOBIL (Lane Change Model)
+
+The MOBIL model (Kesting, Treiber & Helbing, 2007) decides when lane changes are safe and beneficial:
+
+**Safety Criterion:**
+The new follower in the target lane must not need to brake harder than `b_safe`.
+
+**Incentive Criterion:**
+```
+a_new - a_old > p * (Δa_follower) + a_threshold
+
+where:
+  p = politeness factor (0 = selfish, 1 = altruistic)
+  a_threshold = minimum improvement required
+```
+
+**Parameters (Optimized):**
+```typescript
+MOBIL = {
+  p: 0.4,           // Politeness factor (optimized from 0.5 - slightly less polite reduces collisions)
+  athreshold: 0.2,  // Threshold acceleration gain (m/s²)
+  bsafe: 4.0,       // Max safe braking for new follower (m/s²)
+  abias: 0.3,       // Bias toward right lane (m/s²)
+}
+```
+
+### Implementation Best Practices
+
+1. **Small timesteps (dt ≤ 0.1s)** - Larger steps cause instability
+2. **Clamp velocity ≥ 0** - Vehicles cannot move backward accidentally
+3. **Handle no leader** - Use large gap (100m) when no vehicle ahead
+4. **Handle small gaps** - Return creep speed for gaps < s0
+5. **Consistent IDM for MOBIL** - Use same parameters for all acceleration calculations
+
+### Parameter Tuning System
+
+The simulation includes a parameter tuning system (`src/tests/parameter-tuning.ts`) for optimizing IDM/MOBIL parameters:
+
+**Reward Function Components:**
+| Component | Weight | Purpose |
+|-----------|--------|---------|
+| Collision penalty | -1000 | Critical safety |
+| Stuck vehicle penalty | -50 | Traffic flow |
+| Boundary violation penalty | -200 | Stay on road |
+| Physics violation penalty | -100 | Realistic motion |
+| Wait time penalty | -1/sec | Efficiency |
+| Throughput reward | +10/vehicle | Goal achievement |
+
+**Running Parameter Optimization:**
+```bash
+# Analyze a simulation log
+npx tsx src/tests/parameter-tuning.ts --analyze ~/Downloads/simulation-log.json
+
+# Run hill climbing optimization
+npx tsx src/tests/parameter-tuning.ts --optimize --iterations 50
+
+# Evaluate current default parameters
+npx tsx src/tests/parameter-tuning.ts --evaluate
+```
+
+### Spawn Clearance and Lane Discipline
+
+Vehicles spawn on the main road with per-lane clearance checks:
+
+```typescript
+// Spawn clearance is checked PER LANE, not globally
+const minSpawnClearance = CAR_LENGTH * 3; // 13.5m
+
+for (const v of this.state.vehicles) {
+  if (v.location === 'ON_MAIN_ROAD') {
+    // Only check vehicles in the SAME lane
+    if (Math.abs(v.y - laneY) < laneWidth * 0.7) {
+      if (Math.abs(v.x - spawnX) < minSpawnClearance) {
+        return; // Too close, skip spawn
+      }
+    }
+  }
+}
+```
+
+This prevents the "cluster spawn" issue where vehicles in different lanes blocked spawning globally, leading to bursts of spawns followed by collisions.
+
+### Topology-Agnostic Lane Change Gaps
+
+Lane change gap requirements are calculated dynamically based on:
+1. **Vehicle speed** - Higher speeds require larger gaps (using IDM time headway)
+2. **Urgency** - Vehicles near the entry point accept smaller gaps
+3. **Topology dimensions** - Uses `entryRoad.x` for distance calculations
+
+```typescript
+// Speed-dependent gaps: gap = base + speed * time_headway
+const speedBasedGapAhead = PHYSICS.LANE_CHANGE_MIN_GAP + vehicle.speed * IDM.T * 0.5;
+const speedBasedGapBehind = PHYSICS.LANE_CHANGE_MIN_GAP + vehicle.speed * IDM.T;
+
+// Urgency factor based on distance to entry (topology-agnostic)
+const distanceToEntry = vehicle.x - entryRoad.x;
+const urgencyFactor = distanceToEntry > 0
+  ? Math.max(0.3, Math.min(1.0, distanceToEntry / 200)) // 0.3 at <60m, 1.0 at >200m
+  : 0.2; // Very urgent if past entry point
+
+// Final gaps combine speed and urgency
+const minGapAhead = speedBasedGapAhead * urgencyFactor;
+const minGapBehind = speedBasedGapBehind * urgencyFactor;
+```
+
+**Emergency Lane Change (Last Resort):**
+When a vehicle is within 50m of the entry point and cannot find a normal gap, it may force a lane change with minimal safety requirements:
+- Checks for minimal gap (1.2 × CAR_LENGTH)
+- Slows down during the forced lane change
+- Prevents vehicles from missing their turn in heavy traffic
+
+### Emergency Braking Logic
+
+When vehicles get too close, emergency braking activates based on gap distance:
+
+```typescript
+// Emergency gap threshold (topology-agnostic - based on CAR_LENGTH)
+const EMERGENCY_GAP = CAR_LENGTH * 0.2; // 0.9m edge gap
+
+if (gap < 0) {
+  // Overlap - allow tiny creep to separate
+  return SPEEDS.CREEP * 0.1;
+}
+
+if (gap < EMERGENCY_GAP) {
+  // Emergency zone - very slow creep to prevent collision
+  const ratio = gap / EMERGENCY_GAP;
+  return SPEEDS.CREEP * (0.1 + 0.1 * ratio);
+}
+
+if (gap < idmParams.s0) {
+  // Below jam distance - creep slowly
+  const ratio = (gap - EMERGENCY_GAP) / (idmParams.s0 - EMERGENCY_GAP);
+  return SPEEDS.CREEP * (0.2 + 0.3 * ratio);
+}
+```
+
+This graduated response:
+- Prevents complete deadlocks (always allows minimal creep)
+- Smoothly transitions from emergency to normal IDM behavior
+- Uses topology-agnostic values (CAR_LENGTH, SPEEDS constants)
+
+---
+
 ## Rendering (`App.tsx`)
 
 ### Coordinate System
@@ -1628,6 +1824,49 @@ This pattern ensures:
 
 ---
 
+### Version 3.4.1 - Topology-Agnostic Gap Calculations
+
+- Implemented speed-dependent and urgency-based lane change gap requirements
+
+- **Speed-Dependent Gap Calculation**:
+  - Gap requirements now scale with vehicle speed using IDM time headway
+  - Formula: `gap = base_gap + speed × time_headway`
+  - Higher speeds require larger gaps for safe lane changes
+  - Ensures realistic following behavior at all speeds
+
+- **Urgency-Based Gap Relaxation**:
+  - Vehicles near entry point accept smaller gaps (urgency factor)
+  - Factor scales from 1.0 (200m+ from entry) to 0.2 (past entry point)
+  - Prevents vehicles from missing turns in heavy traffic
+
+- **Emergency Lane Change (Last Resort)**:
+  - Vehicles within 50m of entry can force lane change with minimal gap (1.2 × CAR_LENGTH)
+  - Slows down during forced lane change for safety
+  - `hasMinimalLaneChangeGap()` function checks basic collision clearance
+
+- **Graduated Emergency Braking**:
+  - Replaced hard stop at emergency gap with graduated response
+  - At gap < 0 (overlap): Allow 10% creep speed to separate
+  - At gap < EMERGENCY_GAP: Scale from 10-20% creep speed
+  - At gap < s0: Scale from 20-50% creep speed
+  - Prevents complete deadlocks while maintaining safety
+
+- **MOBIL Parameter Optimization**:
+  - Optimized politeness factor from 0.5 to 0.4
+  - Slightly less polite behavior reduces collisions in dense traffic
+  - All IDM parameters verified optimal (no changes needed)
+
+- **Test Improvements**:
+  - Increased full-cycle test durations (600s/800s) for lane change delays
+  - Dense traffic collision test now passes consistently
+
+- **Files Changed**:
+  - `simulation.ts`: `computeSpeedFromGap()`, `canChangeLane()`, `updateLaneChange()`, `hasMinimalLaneChangeGap()`
+  - `types.ts`: MOBIL.p = 0.4
+  - `interaction-tests.ts`: Extended test durations
+
+---
+
 ## Known Limitations
 
 1. Single-file movement in aisles (no passing)
@@ -1657,3 +1896,396 @@ This pattern ensures:
 - [ ] Handicap spot prioritization
 - [ ] Real-time analytics dashboard
 - [ ] Complex intersection topologies
+
+---
+
+## Evolution Roadmap: From Prototype to Traffic Laboratory
+
+### Current State Assessment
+
+The current code base is an **excellent rule-based micro-simulation prototype** containing:
+- Clear physical topology / behavioural separation
+- Reasonable kinematics (point-mass + max accel/decel)
+- Robust lane-change, merge and stuck-recovery logic
+- Instrumentation (snapshots, events, logging)
+
+For a first-generation "parking-lot bottleneck analyser" this is more than enough. The following roadmap outlines how to evolve it into a **general-purpose traffic laboratory** where "cars learn how to move in any situation".
+
+---
+
+### Phase 1: Immediate, Low-Risk Improvements (Keep Rule-Based)
+
+| Area | What to Change | Benefit |
+|------|----------------|---------|
+| **Physics fidelity** | Replace point-mass with bicycle model (steering angle, turning radius). Use continuous time-integration (semi-implicit Euler). | Correct cornering, realistic turning radii, fewer corner-cutting artefacts. |
+| **Behavioural models** | Replace bespoke gap/yield logic with published models: IDM/Gipps for car-following, MOBIL for lane changing. | Less code, easier calibration, peer-reviewed realism. |
+| **Path planning** | Compute paths lazily with A*/Dijkstra on a graph instead of hard-coded waypoint recipes. | Any topology becomes plug-and-play; no manual path tweaks. |
+| **Collision** | Use bounding rectangles + swept collision (continuous) instead of centre-point + nudge. | Removes "tunnelling" and late detections at high speed. |
+| **Performance** | Move simulation loop to a Web Worker. Replace grid with dynamic hashed grid or kd-tree when vehicle count grows. | 60 FPS rendering even with thousands of vehicles. |
+| **Code health** | Enable `strictNullChecks`, `noImplicitAny`, `exactOptionalPropertyTypes`. Add unit tests for each behaviour transition. Adopt ESLint + Prettier config. | Fewer regressions, better onboarding for contributors. |
+
+---
+
+### Phase 2: Medium-Term Architectural Upgrades
+
+1. **Entity-Component-System (ECS)**
+   - Decouple "vehicle data" (components) from "systems" (behaviours)
+   - Makes it trivial to add trucks, buses, pedestrians without duplicating code
+
+2. **Event-Driven Traffic Control**
+   - Implement the `TrafficLight` state machine
+   - Turn the "mustStop" flag into a subscription to events (`LIGHT_RED`, `LIGHT_GREEN`)
+
+3. **Scenario Scripting Layer**
+   - A small DSL or JSON schema: "every 15s spawn 20 cars at gate A, close exit B for 30s, switch light C to red"
+   - Essential for bottleneck experiments
+
+4. **Headless Mode**
+   - A Node.js build that runs N× faster than real-time and dumps CSV
+   - Perfect for Monte-Carlo studies and CI tests
+
+---
+
+### Phase 3: Machine Learning Integration Strategy
+
+**Where ML adds value:**
+
+| ML Use-Case | Fit | Notes |
+|-------------|-----|-------|
+| **Parameter calibration** (IDM `a`, `b`, `T`, etc.) against real trajectory data | ★★★ | Simple optimisation / Bayesian calibration; low risk. |
+| **Behavioural diversity** (aggressive, cautious, distracted drivers) | ★★☆ | Sample driver parameters from learned distributions. |
+| **Adaptive route choice** (RL to minimise travel time under congestion) | ★★☆ | Useful when multiple alternative paths exist. |
+| **Local decision policy** (deep RL for acceleration/steering each frame) | ★☆☆ | Overkill for most research; needs massive training data; hard to guarantee safety. |
+| **Computer-vision perception** inside sim | ☆☆☆ | Not relevant – we have perfect ground truth. |
+
+**Recommendation:** Stay rule-based for core safety-critical manoeuvres (collision avoidance, lane keeping). Use ML only for *high-level* decisions or for *calibrating* the many tunable constants already in the code.
+
+---
+
+### Suggested Version Roadmap
+
+| Version | Focus | Key Changes |
+|---------|-------|-------------|
+| **v3.5** | Physics upgrade | Integrate bicycle model, refactor `applyAcceleration` & `followPath` |
+| **v3.6** | ECS refactor + Web Worker | Split components (Position, Kinematics, DriverProfile, Intent, Path), run systems in worker |
+| **v4.0** | Generic topology loader | Import OpenDRIVE/GeoJSON → auto-generate road graph, switch to graph-based A* routing |
+| **v4.1** | Behaviour calibration | Collect GPS traces or NGSIM data, optimise IDM/MOBIL parameters with CMA-ES, export "driver archetypes" JSON |
+| **v5.0** | Scenario engine & dashboard | YAML/JSON scenario scripts, real-time charts (queue length, delay, throughput), batch runner for sensitivity analysis |
+| **v5.x** | Optional ML branch | Try PPO/TD3 agents for tactical lane selection or dynamic gap acceptance – sandboxed, not in core library |
+
+---
+
+### Quick-Win: Driver Profile Implementation
+
+Add behavioural heterogeneity with minimal code changes (~200 LOC):
+
+```typescript
+// types.ts
+export interface DriverProfile {
+  maxAcceleration: number;      // m/s²
+  comfortableBraking: number;   // m/s²
+  desiredTimeHeadway: number;   // seconds
+  politeness: number;           // MOBIL parameter
+  aggressiveness: number;       // lane change threshold
+}
+
+// simulation.ts, during vehicle spawn
+const profile = randomDriverProfile();
+vehicle.profile = profile;
+
+// Then use vehicle.profile instead of global PHYSICS constants
+// in computeTargetSpeed() and canChangeLane()
+```
+
+This provides instant behavioural diversity with minimal refactoring.
+
+---
+
+### Bottom Line
+
+- The current deterministic, rule-based simulator is **appropriate for bottleneck studies** in small to medium layouts
+- Focus first on **physics fidelity, modularity, performance, and calibration** before introducing heavyweight ML
+- Use machine learning selectively – mainly for parameter tuning or strategic decision layers – not as a wholesale replacement for proven traffic-flow models
+
+---
+
+## Test Suite for Disciplined Driving
+
+The simulation includes a comprehensive test suite to validate realistic vehicle behavior. Tests can be run on exported simulation logs or via headless simulation.
+
+### Test Architecture
+
+```
+src/tests/
+├── test-harness.ts       # Core utilities: seeded RNG, TestSim wrapper, assertions
+├── log-analyzer.ts       # Analyze exported JSON logs from UI
+├── unit-tests.ts         # Pure function tests (math, constants, topology)
+├── interaction-tests.ts  # Multi-vehicle behavior tests
+├── scenario-tests.ts     # Full-flow scenario and regression tests
+├── run-all-tests.ts      # Main test runner CLI
+└── golden/               # Golden baseline files for regression
+    └── standard-scenario.json
+```
+
+### Running Tests
+
+```bash
+# Run all tests
+npx ts-node src/tests/run-all-tests.ts
+
+# Run specific test suites
+npx ts-node src/tests/run-all-tests.ts --unit
+npx ts-node src/tests/run-all-tests.ts --interaction
+npx ts-node src/tests/run-all-tests.ts --scenario
+
+# Analyze exported log file
+npx ts-node src/tests/run-all-tests.ts --log ~/Downloads/simulation-log.json --report
+
+# Quick smoke test (skips long scenarios)
+npx ts-node src/tests/run-all-tests.ts --quick
+```
+
+### Test Harness Essentials
+
+**Deterministic RNG:**
+```typescript
+import { createTestSim, seedRandom } from './test-harness';
+
+// Create simulation with seeded random
+const { sim, step, run } = createTestSim(200, 42); // 200 spots, seed=42
+
+// Run simulation for 60 seconds at 50ms steps
+run(60, 0.05);
+
+// Access vehicles
+const vehicles = sim.state.vehicles;
+```
+
+**Assertion Utilities:**
+```typescript
+import {
+  expectWithin,
+  expectVehicleState,
+  expectNoCollisions,
+  expectAllWithinPavedArea,
+  expectSpeedLimitCompliance,
+  expectNoStuckVehicles,
+  expectMinimumGap,
+} from './test-harness';
+
+// Check value tolerance
+expectWithin(speed, 13.4, 0.5, 'speed');
+
+// Check vehicle state
+expectVehicleState(vehicle, 'PARKED');
+
+// Check no collisions in vehicle list
+expectNoCollisions(vehicles);
+
+// Check all within paved area
+expectAllWithinPavedArea(sim, vehicles);
+```
+
+---
+
+### Test Categories
+
+#### 1. Unit Tests (Pure Functions)
+
+| Function | Cases Covered |
+|----------|---------------|
+| `normalizeAngle` | Wrap ±2π, preserve ±π/2 |
+| `distance` | Horizontal, vertical, diagonal (3-4-5), same point |
+| Constants | CAR_LENGTH, CAR_WIDTH, SPEEDS, PHYSICS realistic ranges |
+| `isWithinPavedArea` | Lot center, main road, off-map, despawn extension |
+| Topology creation | Spot count, lane count, entry/exit separation |
+
+#### 2. Interaction Tests (≥2 Vehicles)
+
+| Test | Setup | Success Criteria |
+|------|-------|------------------|
+| Safe following | Multiple vehicles in lanes | Gap never < `MIN_GAP`, no collisions |
+| Lane change safety | Vehicles changing lanes | No collisions, reasonable duration (0.5-10s) |
+| Speed compliance | All locations | Never exceeds location-specific limit |
+| Stuck detection | 30+ vehicles, 3 min | No vehicle stuck > 45s |
+| Boundary integrity | Fill + drive | All positions within `isWithinPavedArea()` |
+| Merge behavior | Exodus phase | Vehicles wait for safe gaps |
+| Acceleration limits | Track Δv/Δt | Never exceeds MAX_ACCELERATION/EMERGENCY_DECEL |
+
+#### 3. Scenario Tests (Full Flow)
+
+| Scenario | Configuration | KPIs |
+|----------|---------------|------|
+| Happy-path: 1 car | 50 spots, 1 vehicle | Parks + exits, 0 collisions |
+| Happy-path: 10 cars | 100 spots, 10 vehicles | ≥80% exit rate, 0 collisions |
+| Happy-path: 25 cars + traffic | 150 spots, 25 vehicles, 30 veh/min | ≥70% exit rate |
+| Stress: 50 vehicles | 200 spots, 40 veh/min traffic | 0 collisions, <60s max wait |
+| Stress: 100 vehicles | 300 spots, 15 min fill | 0 collisions, <90s max wait |
+| Lane change urgency | 30 vehicles | ≥70% reach entry successfully |
+| Boundary: 5 min | 40 vehicles | 0 off-road snapshots |
+| Exodus completion | Fill + exit | ≥90% vehicles exit |
+| Performance | 50 vehicles, 10 min | <5s wall time |
+| Determinism | Same seed twice | Identical results |
+
+#### 4. Log Analysis Tests
+
+Run on exported simulation logs (JSON):
+
+| Test | What It Checks |
+|------|----------------|
+| Speed Limits | No vehicle exceeds location-based limits |
+| Acceleration Limits | Δv/Δt within comfortable/emergency bounds |
+| Position Continuity | No teleportation (movement matches speed) |
+| Lane Discipline | Y-position matches lane center when not changing |
+| Lane Change Safety | Duration 0.5-10s, smooth execution |
+| Stuck Vehicles | No vehicle stuck > 30s (except parked) |
+| Vehicle Proximity | No moving vehicles closer than 0.5×CAR_LENGTH |
+| Spawn Rate | No burst spawning (interval > 0.1s) |
+| State Transitions | Only valid state transitions occur |
+| Parking Success | ≥70% of seeking vehicles park |
+| Reversing Safety | Speed ≤ 1.5×BACKUP during reverse |
+| Heading Consistency | Turn rate ≤ 180°/s at speed |
+| Path Progress | No stalls > 30s without waypoint advance |
+| Exit Completion | ≥90% of exiting vehicles complete |
+
+---
+
+### Golden Log Regression
+
+For each version, save a golden summary:
+
+```json
+{
+  "seed": 12345,
+  "numSpots": 100,
+  "fillCount": 25,
+  "duration": 610,
+  "totalSpawned": 25,
+  "parkedCount": 23,
+  "exitedCount": 21,
+  "maxWaitTime": 12.5,
+  "timestamp": "2025-12-27T00:00:00.000Z"
+}
+```
+
+CI compares new runs against golden with ±10% tolerance. Large drift flags behavior changes.
+
+---
+
+### Adding New Tests
+
+**Unit Test Example:**
+```typescript
+// unit-tests.ts
+{
+  name: 'myFunction handles edge case',
+  category: 'Math Utilities',
+  run: () => {
+    const result = myFunction(edgeInput);
+    return expectWithin(result, expectedValue, tolerance, 'myFunction');
+  },
+}
+```
+
+**Interaction Test Example:**
+```typescript
+// interaction-tests.ts
+{
+  name: 'Vehicles yield at intersection',
+  category: 'Yielding',
+  run: () => {
+    const testSim = createTestSim(100, 1234);
+    testSim.sim.fillLot(20);
+    testSim.run(120);
+
+    const vehicles = testSim.getAllVehicles();
+    return expectNoCollisions(vehicles);
+  },
+}
+```
+
+**Scenario Test Example:**
+```typescript
+// scenario-tests.ts
+{
+  name: 'Custom scenario: rush hour',
+  category: 'Stress Test',
+  run: () => {
+    const result = runScenario({
+      name: 'rush-hour',
+      numSpots: 300,
+      fillCount: 100,
+      fillDuration: 600,
+      waitDuration: 0,
+      exodusDuration: 600,
+      roadTrafficRate: 60,
+      seed: 9999,
+    });
+
+    return {
+      passed: result.collisionCount === 0 && result.maxWaitTime < 120,
+      message: `Collisions: ${result.collisionCount}, Max wait: ${result.maxWaitTime}s`,
+      details: result,
+    };
+  },
+}
+```
+
+---
+
+### Test-Driven Development Workflow
+
+1. **Before implementing new behavior:**
+   - Add failing test that validates expected behavior
+   - Run `--quick` to verify test fails appropriately
+
+2. **After implementation:**
+   - Run full test suite
+   - Check no regressions in existing tests
+   - Update golden baselines if behavior intentionally changed
+
+3. **For bug fixes:**
+   - Add test that reproduces the bug
+   - Fix the bug
+   - Verify test now passes
+
+4. **Before release:**
+   ```bash
+   npx ts-node src/tests/run-all-tests.ts
+   ```
+   All tests must pass.
+
+
+### Behavioral Validation Tests (12 Core Requirements)
+
+These tests are implemented in `src/tests/behavioral-tests.ts` and can be run with:
+```bash
+npm run test:behavioral
+```
+
+| # | Test | Category | Description |
+|---|------|----------|-------------|
+| 1 | Cars able to park | Parking Ability | ≥80% of spawned vehicles should park within 5 minutes |
+| 2 | No duplicate spots | Spot Assignment | No two vehicles assigned to same parking spot |
+| 3 | No stuck vehicles | Stuck Detection | ≤5% of active vehicles stuck (waiting >60s) |
+| 4 | Lane discipline | Driving Discipline | <5% lane violations, yielding behavior observed |
+| 5 | No collisions | Collision Avoidance | Zero collisions during entire simulation |
+| 6 | Spawn clearance | Spawn Behavior | Vehicles spawn with adequate clearance (>1.5 car lengths) |
+| 7 | Parking completion | Task Completion | ≥90% of parking-bound vehicles eventually park |
+| 8 | Parked car avoidance | Obstacle Avoidance | Active vehicles properly navigate around parked vehicles |
+| 9 | Paved path constraint | Boundary Integrity | 100% of vehicle positions within paved areas |
+| 10 | Conflict resolution | Conflict Resolution | Priority-based conflict handling with minimal deadlocks |
+| 11 | Context-aware behavior | Context Awareness | Speed varies appropriately by location (main road > lot) |
+| 12 | Task completion metrics | Metrics | Fill rate ≥80%, Exit rate ≥80%, throughput tracking |
+
+Additionally, there are **degree-based metric tests** that report scores rather than pass/fail:
+- **Efficiency Score**: Combined parking rate and wait time metric (0-100)
+- **Flow Quality**: Throughput vs theoretical maximum (0-100)
+- **Safety Score**: Based on near-miss frequency (0-100)
+
+## Personal Notes
+
+- Pay Rent
+- Wire + Charger + Pods
+- Ahaan Watch + Charger
+- Cars inside

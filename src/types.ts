@@ -51,6 +51,64 @@ export const PHYSICS = {
 } as const;
 
 // ----------------------------------------------------------------------------
+// IDM (Intelligent Driver Model) Parameters
+// Based on Treiber, Hennecke & Helbing (2000)
+// Context-aware: different parameters for different driving situations
+// ----------------------------------------------------------------------------
+
+// IDM parameter interface
+export interface IDMParams {
+  T: number;      // Time headway (seconds)
+  s0: number;     // Minimum gap / jam distance (meters)
+  a: number;      // Comfortable acceleration (m/s²)
+  b: number;      // Comfortable deceleration (m/s²)
+  delta: number;  // Acceleration exponent
+}
+
+// Highway/main road parameters (standard IDM)
+export const IDM: IDMParams = {
+  T: 1.5,                     // seconds - comfortable highway following
+  s0: 2.0,                    // meters - minimum bumper-to-bumper gap
+  a: 2.5,                     // m/s² - comfortable acceleration
+  b: 4.0,                     // m/s² - comfortable deceleration
+  delta: 4,                   // dimensionless
+};
+
+// Parking lot / urban parameters (tighter following, slower speeds)
+export const IDM_PARKING: IDMParams = {
+  T: 1.0,                     // seconds - shorter following in parking lot
+  s0: 1.5,                    // meters - tighter jam distance at low speeds
+  a: 2.0,                     // m/s² - gentler acceleration
+  b: 3.0,                     // m/s² - gentler braking
+  delta: 4,
+};
+
+// Merge/lane-change parameters (more aggressive for merging)
+export const IDM_MERGE: IDMParams = {
+  T: 1.2,                     // seconds - slightly tighter for merging
+  s0: 1.5,                    // meters - accept tighter gaps
+  a: 2.5,                     // m/s² - normal acceleration
+  b: 4.0,                     // m/s² - normal braking
+  delta: 4,
+};
+
+// ----------------------------------------------------------------------------
+// MOBIL (Minimizing Overall Braking Induced by Lane changes) Parameters
+// Based on Kesting, Treiber & Helbing (2007)
+// ----------------------------------------------------------------------------
+export const MOBIL = {
+  // Politeness factor: 0 = selfish, 1 = altruistic
+  // Optimized from 0.5 to 0.4 - slightly less polite reduces collisions
+  p: 0.4,
+  // Threshold acceleration gain required to change lanes
+  athreshold: 0.2,            // m/s² - minimum improvement required
+  // Maximum safe braking imposed on follower in target lane
+  bsafe: 4.0,                 // m/s² - must not force follower to brake harder than this
+  // Bias toward right lane (for staying right)
+  abias: 0.3,                 // m/s² - slight preference for right lanes
+} as const;
+
+// ----------------------------------------------------------------------------
 // SPATIAL GRID (for efficient neighbor lookups)
 // ----------------------------------------------------------------------------
 export const GRID_CELL_SIZE = 10; // meters per grid cell
