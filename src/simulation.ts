@@ -604,6 +604,32 @@ export class Simulation {
       }
     }
 
+    // COOPERATIVE LANE CHANGE YIELDING:
+    // If we're in lane 0 and a vehicle in lane 1 needs to merge into lane 0 to reach
+    // the entry, we should occasionally yield by slowing down to create a gap.
+    // This prevents gridlock when lane 0 is full and no one can change lanes.
+    if (me.currentLane === 0) {
+      const { entryRoad } = this.topology;
+
+      for (const other of nearby) {
+        if (other.id === me.id) continue;
+        if (other.currentLane !== 1) continue; // Only yield to lane 1 vehicles
+        if (other.intent !== 'SEEKING_PARKING') continue; // Only yield to parking seekers
+
+        // Check if this vehicle needs to change to lane 0 and is struggling
+        const otherDistToEntry = other.x - entryRoad.x;
+        const isNearEntry = otherDistToEntry > 0 && otherDistToEntry < 200;
+        const isStrugglingToChange = !other.behaviors.isChangingLane && other.speed < 2.0;
+
+        // If they're behind us and need to get to lane 0, yield to create a gap
+        if (isNearEntry && isStrugglingToChange && other.x > me.x && other.x < me.x + 30) {
+          // Slow down to let them merge in front of us
+          yieldSpeed = Math.min(yieldSpeed, other.speed * 0.5);
+          me.behaviors.isYielding = true;
+        }
+      }
+    }
+
     // PROACTIVE SLOWDOWN: When in lane 0 approaching the entry zone, slow down slightly
     // to give time to react to cars turning. This is realistic defensive driving.
     if (me.currentLane === 0 && me.intent !== 'SEEKING_PARKING') {
@@ -1419,18 +1445,7 @@ export class Simulation {
       urgencyFactor = Math.min(1.0, distanceToEntry / 400); // Relaxed when far away
     }
 
-    // SPEED-DEPENDENT GAPS:
-    // At higher speeds, we need larger gaps for safe lane changes
-    // gap = base_gap + speed * time_headway
-    // Use IDM time headway (1.5s) as reference
-    const speedBasedGapAhead = PHYSICS.LANE_CHANGE_MIN_GAP + vehicle.speed * IDM.T * 0.5;
-    const speedBasedGapBehind = PHYSICS.LANE_CHANGE_MIN_GAP + vehicle.speed * IDM.T;
-
-    // Combine speed-based gaps with urgency factor
-    const minGapAhead = speedBasedGapAhead * urgencyFactor;
-    const minGapBehind = speedBasedGapBehind * urgencyFactor;
-
-    // Check all vehicles in target lane (including pass-through traffic)
+    // Check all vehicles in target lane first to get follower speed
     for (const other of this.state.vehicles) {
       if (other.id === vehicle.id) continue;
       if (other.state === 'PARKED' || other.state === 'EXITED') continue;
@@ -1456,12 +1471,34 @@ export class Simulation {
       }
     }
 
+    // SPEED-DEPENDENT GAPS:
+    // Gap required depends on the CLOSING SPEED (difference between follower and us)
+    // If follower is slower than us, we need minimal gap
+    // If follower is faster, we need gap based on their speed to avoid collision
+    const closingSpeed = Math.max(0, newFollowerSpeed - vehicle.speed);
+    const ourSpeedFraction = Math.min(vehicle.speed / SPEEDS.MAIN_ROAD, 1.0);
+
+    // Base gap scales with our speed: at 0 m/s we need only CAR_LENGTH gap
+    const baseGap = CAR_LENGTH + (PHYSICS.LANE_CHANGE_MIN_GAP - CAR_LENGTH) * ourSpeedFraction;
+
+    // Gap ahead: based on our speed (we might run into the leader)
+    const speedBasedGapAhead = baseGap + vehicle.speed * PHYSICS.LANE_CHANGE_TIME * 0.3;
+
+    // Gap behind: based on CLOSING speed (follower might hit us)
+    // If follower is slower than us (closing speed = 0), minimal gap needed
+    // If follower is faster, need gap = closing_speed * time_to_complete_lane_change
+    const speedBasedGapBehind = CAR_LENGTH * 1.2 + closingSpeed * PHYSICS.LANE_CHANGE_TIME;
+
+    // Combine speed-based gaps with urgency factor
+    const minGapAhead = speedBasedGapAhead * urgencyFactor;
+    const minGapBehind = speedBasedGapBehind * urgencyFactor;
+
     // Safety check 1: Minimum gap ahead (can't cut in too close to leader)
     if (newLeaderGap < minGapAhead) {
       return false;
     }
 
-    // Safety check 2: Minimum gap behind (basic collision avoidance)
+    // Safety check 2: Minimum gap behind (based on closing speed)
     if (newFollowerGap < minGapBehind) {
       return false;
     }
@@ -1970,8 +2007,12 @@ export class Simulation {
   private spawnPassThroughVehicle(): void {
     const { mainRoad } = this.topology;
 
-    // Pass-through vehicles can spawn in any lane (realistic traffic)
-    const spawnLane = Math.floor(Math.random() * mainRoad.lanes);
+    // Pass-through vehicles should NOT spawn in lane 0 (the entry lane).
+    // Lane 0 is reserved for vehicles that need to turn right into the parking lot.
+    // Pass-through traffic in lane 0 would block parking vehicles from entering.
+    // For a 3-lane road: spawn in lanes 1 or 2 only
+    const availableLanes = mainRoad.lanes > 1 ? mainRoad.lanes - 1 : 1;
+    const spawnLane = 1 + Math.floor(Math.random() * availableLanes); // Lane 1 or 2
     const laneY = getLaneY(mainRoad, spawnLane);
     const laneWidth = mainRoad.width / mainRoad.lanes;
 

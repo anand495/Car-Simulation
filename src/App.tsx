@@ -272,7 +272,8 @@ function drawStats(
   ctx: CanvasRenderingContext2D,
   sim: Simulation,
   fps: number,
-  canvas: HTMLCanvasElement
+  canvas: HTMLCanvasElement,
+  realTime: number = 0
 ): void {
   const state = sim.state;
 
@@ -316,7 +317,7 @@ function drawStats(
 
   // Draw panel in TOP-RIGHT corner (more visible)
   const panelWidth = 220;
-  const panelHeight = 240;
+  const panelHeight = 256;  // Increased for real time display
   const panelX = canvas.width - panelWidth - 10;
   const panelY = 10;
 
@@ -336,7 +337,9 @@ function drawStats(
 
   // Time and phase
   ctx.fillStyle = '#888';
-  ctx.fillText(`Time: ${state.time.toFixed(1)}s | FPS: ${fps.toFixed(0)}`, panelX + 10, y);
+  ctx.fillText(`Sim: ${state.time.toFixed(1)}s | Real: ${realTime.toFixed(1)}s`, panelX + 10, y);
+  y += lineHeight;
+  ctx.fillText(`FPS: ${fps.toFixed(0)} | Speed: ${realTime > 0 ? (state.time / realTime).toFixed(1) : '0.0'}x`, panelX + 10, y);
   y += lineHeight;
   ctx.fillStyle = state.phase === 'FILLING' ? '#4ade80' : state.phase === 'EXODUS' ? '#f97316' : '#fff';
   ctx.fillText(`Phase: ${state.phase}`, panelX + 10, y);
@@ -392,7 +395,8 @@ function render(
   canvas: HTMLCanvasElement,
   sim: Simulation,
   camera: Camera,
-  fps: number
+  fps: number,
+  realTime: number = 0
 ): void {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
@@ -410,7 +414,7 @@ function render(
   }
 
   // Draw stats overlay
-  drawStats(ctx, sim, fps, canvas);
+  drawStats(ctx, sim, fps, canvas, realTime);
 }
 
 // ============================================================================
@@ -657,6 +661,7 @@ interface Stats {
   exited: number;
   throughput: number;
   avgExitTime: number | null;
+  realTime: number;  // Real elapsed time in seconds
 }
 
 export default function App() {
@@ -673,7 +678,11 @@ export default function App() {
     exited: 0,
     throughput: 0,
     avgExitTime: null,
+    realTime: 0,
   });
+
+  // Track when simulation started (real time)
+  const simStartTimeRef = useRef<number | null>(null);
 
   const [vehicleCount, setVehicleCount] = useState(100);
   const [speed, setSpeed] = useState(1);
@@ -718,13 +727,19 @@ export default function App() {
       const sim = simRef.current;
       const canvas = canvasRef.current;
 
+      // Calculate real elapsed time
+      let realElapsed = 0;
+      if (simStartTimeRef.current !== null) {
+        realElapsed = (currentTime - simStartTimeRef.current) / 1000;
+      }
+
       if (sim && canvas && !isPaused) {
         // Step simulation (with speed multiplier)
         const simDt = Math.min(dt * speed, 0.1); // cap to prevent instability
         sim.step(simDt);
 
         // Render
-        render(canvas, sim, cameraRef.current, fpsRef.current);
+        render(canvas, sim, cameraRef.current, fpsRef.current, realElapsed);
 
         // Update React state (throttled to 10Hz)
         if (currentTime - lastStatsUpdate > 100) {
@@ -736,12 +751,13 @@ export default function App() {
             exited: sim.state.exitedCount,
             throughput: sim.state.throughput,
             avgExitTime: sim.state.avgExitTime,
+            realTime: realElapsed,
           });
           lastStatsUpdate = currentTime;
         }
       } else if (sim && canvas) {
         // Still render when paused
-        render(canvas, sim, cameraRef.current, fpsRef.current);
+        render(canvas, sim, cameraRef.current, fpsRef.current, realElapsed);
       }
 
       animationId = requestAnimationFrame(loop);
@@ -810,6 +826,10 @@ export default function App() {
   const handleFillLot = useCallback(() => {
     if (simRef.current) {
       simRef.current.fillLot(vehicleCount);
+      // Start tracking real time when simulation begins
+      if (simStartTimeRef.current === null) {
+        simStartTimeRef.current = performance.now();
+      }
     }
   }, [vehicleCount]);
 
@@ -822,6 +842,7 @@ export default function App() {
   const handleReset = useCallback(() => {
     if (simRef.current) {
       simRef.current.reset();
+      simStartTimeRef.current = null;  // Reset real time tracking
       setStats({
         time: 0,
         phase: 'IDLE',
@@ -830,6 +851,7 @@ export default function App() {
         exited: 0,
         throughput: 0,
         avgExitTime: null,
+        realTime: 0,
       });
     }
   }, []);
@@ -905,7 +927,8 @@ export default function App() {
       zoom: 1.5,
     };
 
-    // Reset stats
+    // Reset stats and real time tracking
+    simStartTimeRef.current = null;
     setStats({
       time: 0,
       phase: 'IDLE',
@@ -914,6 +937,7 @@ export default function App() {
       exited: 0,
       throughput: 0,
       avgExitTime: null,
+      realTime: 0,
     });
   }, [settings]);
 
@@ -1022,8 +1046,13 @@ export default function App() {
             </div>
             <div style={styles.statusDivider} />
             <div style={styles.statusItem}>
-              <span style={styles.statusLabel}>Time</span>
+              <span style={styles.statusLabel}>Sim Time</span>
               <span style={styles.statusValue}>{stats.time.toFixed(1)}s</span>
+            </div>
+            <div style={styles.statusDivider} />
+            <div style={styles.statusItem}>
+              <span style={styles.statusLabel}>Real Time</span>
+              <span style={styles.statusValue}>{stats.realTime.toFixed(1)}s</span>
             </div>
             <div style={styles.statusDivider} />
             <div style={styles.statusItem}>

@@ -2283,9 +2283,332 @@ Additionally, there are **degree-based metric tests** that report scores rather 
 - **Flow Quality**: Throughput vs theoretical maximum (0-100)
 - **Safety Score**: Based on near-miss frequency (0-100)
 
-## Personal Notes
+---
 
-- Pay Rent
-- Wire + Charger + Pods
-- Ahaan Watch + Charger
-- Cars inside
+## Topology Editor (Planned Feature)
+
+This section documents the planned topology editor feature that will allow users to create, modify, and save custom parking lot and road layouts.
+
+### Overview
+
+The topology editor will provide a visual interface for creating custom simulation environments without modifying code. Users will be able to:
+- Create new topologies from scratch or from templates
+- Modify existing topologies
+- Save and load topologies as JSON files
+- Validate topologies before running simulations
+
+### Topology Element Catalog
+
+The following elements are available for constructing infrastructure:
+
+#### 1. Road Infrastructure
+
+| Element | Type | Description | Key Properties |
+|---------|------|-------------|----------------|
+| **Road Segment** | `road` | Straight road section | x, y, length, width, lanes, direction, speedLimit |
+| **Curved Road** | `curved_road` | Arc-shaped road for turns | centerX, centerY, radius, startAngle, endAngle, lanes |
+| **Intersection** | `intersection` | Junction of roads | type (3-way, 4-way, roundabout), controlType |
+| **Lane** | `lane` | Individual lane within road | index, direction, type (normal, turn, merge) |
+| **Ramp** | `ramp` | Entry/exit ramp | slope, curvature, mergeType |
+| **Bridge** | `bridge` | Elevated road crossing | elevation, supportedLoad |
+| **Tunnel** | `tunnel` | Underground passage | depth, ventilation |
+| **Median** | `median` | Traffic divider | width, crossable (boolean) |
+| **Shoulder** | `shoulder` | Emergency stopping area | width, surfaceType |
+
+#### 2. Parking Infrastructure
+
+| Element | Type | Description | Key Properties |
+|---------|------|-------------|----------------|
+| **Parking Spot** | `spot` | Standard parking space | x, y, width, length, aisleId, angle |
+| **Handicap Spot** | `handicap_spot` | Accessible parking | accessAisleWidth, signage |
+| **Compact Spot** | `compact_spot` | Smaller vehicle spot | maxVehicleLength |
+| **EV Charging Spot** | `ev_spot` | Electric vehicle spot | chargerType, powerOutput |
+| **Reserved Spot** | `reserved_spot` | Designated parking | reservationType, permitRequired |
+| **Motorcycle Spot** | `motorcycle_spot` | Two-wheeler parking | count (spots per area) |
+| **Aisle** | `aisle` | Driving lane in lot | y, xStart, xEnd, direction, speedLimit |
+| **Parking Structure** | `structure` | Multi-level garage | levels, rampType, spotsPerLevel |
+| **Drop-off Zone** | `dropoff` | Temporary stopping | maxWaitTime, capacity |
+
+#### 3. Traffic Control
+
+| Element | Type | Description | Key Properties |
+|---------|------|-------------|----------------|
+| **Traffic Light** | `traffic_light` | Signal system | phases[], cycleDuration, controlsDirection |
+| **Stop Sign** | `stop_sign` | Mandatory stop | facingDirection, allWayStop |
+| **Yield Sign** | `yield_sign` | Yield right-of-way | facingDirection, yieldTo |
+| **Speed Limit Sign** | `speed_sign` | Posted limit | speedLimit, unit |
+| **One-Way Sign** | `oneway_sign` | Direction restriction | allowedDirection |
+| **No Entry Sign** | `no_entry` | Entry prohibition | exceptions[] |
+| **Crosswalk** | `crosswalk` | Pedestrian crossing | width, signalized, pedestrianPhase |
+| **Pedestrian Signal** | `ped_signal` | Walk signal | linkedToLight, countdown |
+| **Toll Booth** | `toll_booth` | Payment checkpoint | paymentTypes[], laneCount |
+| **Checkpoint** | `checkpoint` | Security/verification | verificationType, processingTime |
+
+#### 4. Obstacles & Barriers
+
+| Element | Type | Description | Key Properties |
+|---------|------|-------------|----------------|
+| **Broken Down Vehicle** | `disabled_vehicle` | Blocking obstacle | vehicleType, hazardLights, duration |
+| **Barricade** | `barricade` | Temporary barrier | width, height, reflective |
+| **Traffic Cone** | `cone` | Lane guidance | position, color |
+| **Jersey Barrier** | `jersey_barrier` | Concrete barrier | length, height, anchored |
+| **Bollard** | `bollard` | Fixed post | retractable, height, diameter |
+| **Gate/Boom Barrier** | `gate` | Movable barrier | armLength, openSpeed, trigger |
+| **Curb** | `curb` | Road boundary | height, mountable |
+| **Guardrail** | `guardrail` | Safety barrier | length, terminalType |
+| **Debris** | `debris` | Temporary obstacle | size, clearanceRequired |
+| **Pothole** | `pothole` | Road damage | diameter, depth, severity |
+| **Construction Zone** | `construction` | Work area | bounds, speedReduction, laneClosure |
+| **Crash Site** | `crash_site` | Accident scene | severity, lanesBlocked, duration |
+
+#### 5. Buildings & Structures
+
+| Element | Type | Description | Key Properties |
+|---------|------|-------------|----------------|
+| **Building** | `building` | Adjacent structure | footprint, entrances[], height |
+| **Booth** | `booth` | Attendant station | staffed, paymentCapable |
+| **Canopy** | `canopy` | Covered area | bounds, clearanceHeight |
+| **Loading Dock** | `loading_dock` | Commercial zone | dockCount, truckCapacity |
+| **Gas Station** | `gas_station` | Fuel facility | pumpCount, fuelTypes[] |
+| **Car Wash** | `car_wash` | Wash facility | type (auto/manual), queueCapacity |
+| **Entrance Building** | `entrance` | Venue entry | pedestrianFlow, vehicleAccess |
+
+#### 6. Pedestrian Infrastructure
+
+| Element | Type | Description | Key Properties |
+|---------|------|-------------|----------------|
+| **Sidewalk** | `sidewalk` | Walking path | width, surface, ada_compliant |
+| **Pedestrian Path** | `ped_path` | Lot walkway | waypoints[], protected |
+| **Crosswalk** | `crosswalk` | Road crossing | marked, signalized, raiseType |
+| **Pedestrian Bridge** | `ped_bridge` | Elevated walkway | span, width, covered |
+| **Pedestrian Tunnel** | `ped_tunnel` | Underground crossing | lighting, accessibility |
+| **Waiting Area** | `waiting_area` | Pickup zone | capacity, sheltered |
+| **Staircase** | `stairs` | Vertical access | width, steps, handrails |
+| **Elevator** | `elevator` | Vertical transport | capacity, floors[], accessible |
+
+#### 7. Environmental & Decorative
+
+| Element | Type | Description | Key Properties |
+|---------|------|-------------|----------------|
+| **Tree** | `tree` | Landscaping | trunkDiameter, canopyRadius |
+| **Planter/Island** | `island` | Landscaped divider | bounds, drivable (boolean) |
+| **Light Pole** | `light_pole` | Illumination | height, lightRadius, position |
+| **Drainage Grate** | `drain` | Storm drainage | size, coveredBy |
+| **Fire Hydrant** | `hydrant` | No-park marker | clearanceRadius |
+| **Dumpster** | `dumpster` | Waste container | size, accessRequired |
+| **Cart Corral** | `cart_corral` | Shopping cart area | capacity, bounds |
+
+#### 8. Entry/Exit Points
+
+| Element | Type | Description | Key Properties |
+|---------|------|-------------|----------------|
+| **Spawn Point** | `spawn` | Vehicle generation | rate, vehicleTypes[], lane |
+| **Despawn Point** | `despawn` | Vehicle removal | position, conditions |
+| **Entry Gate** | `entry_gate` | Controlled entry | ticketType, accessMethods[] |
+| **Exit Gate** | `exit_gate` | Controlled exit | paymentMethods[], validationRequired |
+| **Emergency Exit** | `emergency_exit` | Emergency egress | alarmTriggered, autoOpen |
+
+#### 9. Zones & Regions
+
+| Element | Type | Description | Key Properties |
+|---------|------|-------------|----------------|
+| **Speed Zone** | `speed_zone` | Speed-limited area | bounds, speedLimit, enforcementType |
+| **No-Parking Zone** | `no_parking` | Prohibited parking | bounds, towEnabled |
+| **Fire Lane** | `fire_lane` | Emergency access | width, alwaysClear |
+| **Loading Zone** | `loading_zone` | Commercial loading | timeLimit, vehicleTypes[] |
+| **Taxi Stand** | `taxi_stand` | Taxi waiting | capacity, queueDirection |
+| **Bus Lane** | `bus_lane` | Reserved lane | operatingHours, sharedWith[] |
+| **HOV Lane** | `hov_lane` | Carpool lane | minOccupancy, operatingHours |
+
+#### 10. Dynamic Elements
+
+| Element | Type | Description | Key Properties |
+|---------|------|-------------|----------------|
+| **Movable Barrier** | `movable_barrier` | Scheduled barrier | schedule[], defaultState |
+| **Variable Message Sign** | `vms` | Digital signage | messageQueue[], displayDuration |
+| **Parking Counter** | `counter` | Availability display | linkedSpots[], position |
+| **Sensor** | `sensor` | Vehicle detection | type (inductive, camera, ultrasonic), range |
+| **Camera** | `camera` | Surveillance | fieldOfView, coverage, type |
+
+### Data Structures
+
+#### TopologyElement Base Interface
+
+```typescript
+interface TopologyElement {
+  id: string;
+  type: string;
+  x: number;
+  y: number;
+  rotation?: number;
+  enabled?: boolean;
+  metadata?: Record<string, unknown>;
+}
+```
+
+#### Obstacle Interface
+
+```typescript
+interface Obstacle extends TopologyElement {
+  type: 'disabled_vehicle' | 'barricade' | 'cone' | 'debris' | 'pothole' | 'construction' | 'crash_site';
+  width: number;
+  height: number;
+  blocking: boolean;          // Completely blocks path
+  speedReduction?: number;    // Speed multiplier (0.5 = half speed)
+  avoidanceRadius?: number;   // How far vehicles should stay away
+  duration?: number;          // Temporary obstacles: removal time (seconds)
+  dynamic?: boolean;          // Can change state during simulation
+}
+```
+
+#### Zone Interface
+
+```typescript
+interface Zone extends TopologyElement {
+  type: 'speed_zone' | 'no_parking' | 'fire_lane' | 'loading_zone';
+  bounds: { x: number; y: number; width: number; height: number };
+  rules: {
+    speedLimit?: number;
+    parkingAllowed?: boolean;
+    stoppingAllowed?: boolean;
+    timeLimit?: number;
+    vehicleTypes?: string[];
+  };
+}
+```
+
+### Editor UI Components
+
+#### Mode Toggle
+- **Simulation Mode**: Run simulations with current topology
+- **Editor Mode**: Create and modify topology elements
+
+#### Tool Palette
+- Selection tool (click to select, drag to move)
+- Road tool (click start/end points)
+- Parking row tool (drag to create row of spots)
+- Obstacle tool (click to place)
+- Zone tool (drag to define area)
+- Delete tool (click to remove)
+
+#### Properties Panel
+- Shows properties of selected element
+- Real-time editing with validation
+- Undo/redo support
+
+#### Element Library
+- Categorized list of available elements
+- Drag-and-drop onto canvas
+- Search and filter
+
+#### Toolbar Actions
+- New topology
+- Open/Save topology
+- Export as JSON
+- Import from JSON
+- Validate topology
+- Preview in simulation
+
+### Validation Rules
+
+Before a topology can be used in simulation, it must pass validation:
+
+1. **Connectivity**: Entry points must connect to road network
+2. **Accessibility**: All parking spots must be reachable from entry
+3. **Exit Routes**: All spots must have path to exit
+4. **No Overlaps**: Elements cannot physically overlap (unless designed to)
+5. **Speed Limits**: All drivable areas must have defined speed limits
+6. **Lane Consistency**: Lane counts must match at road connections
+7. **Spawn Clearance**: Spawn points must have adequate space
+
+### File Format
+
+Topologies are saved as JSON:
+
+```json
+{
+  "version": "1.0",
+  "metadata": {
+    "name": "Custom Mall Parking",
+    "description": "Large mall parking lot with multiple entrances",
+    "author": "User",
+    "created": "2025-12-28T00:00:00Z",
+    "modified": "2025-12-28T00:00:00Z"
+  },
+  "dimensions": {
+    "width": 500,
+    "height": 300
+  },
+  "elements": {
+    "roads": [...],
+    "aisles": [...],
+    "spots": [...],
+    "obstacles": [...],
+    "zones": [...],
+    "trafficControl": [...],
+    "entryExits": [...]
+  },
+  "defaults": {
+    "speedLimit": 4.5,
+    "spotWidth": 2.7,
+    "spotLength": 5.5,
+    "aisleWidth": 6.0
+  }
+}
+```
+
+### Implementation Phases
+
+#### Phase 1: Core Editor (MVP)
+- Mode toggle (Simulation ↔ Editor)
+- Basic element placement (roads, aisles, spots)
+- Property editing panel
+- Save/Load to localStorage
+- Basic validation
+
+#### Phase 2: Visual Editing
+- Drag-and-drop positioning
+- Resize handles for elements
+- Grid snapping
+- Multi-select and group operations
+- Undo/redo history
+
+#### Phase 3: Advanced Elements
+- Obstacles and barriers
+- Traffic control devices
+- Zones and regions
+- Dynamic elements
+
+#### Phase 4: Templates & Presets
+- Built-in topology templates
+- User template library
+- Import/export to file
+- Sharing capabilities
+
+### Integration with Simulation
+
+When switching from Editor to Simulation mode:
+
+1. **Validation**: Topology is validated for completeness
+2. **Compilation**: Elements are compiled into simulation-ready structures
+3. **Path Generation**: Entry/exit paths are computed using A* on road graph
+4. **Speed Zones**: Speed limit lookup table is built
+5. **Collision Mesh**: Obstacle collision boundaries are computed
+
+The simulation engine receives the compiled topology and operates identically to programmatic topologies.
+
+### Keyboard Shortcuts (Planned)
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+N` | New topology |
+| `Ctrl+O` | Open topology |
+| `Ctrl+S` | Save topology |
+| `Ctrl+Z` | Undo |
+| `Ctrl+Y` | Redo |
+| `Delete` | Delete selected |
+| `Escape` | Deselect / Cancel |
+| `G` | Toggle grid snap |
+| `R` | Rotate selected |
+| `Space` | Toggle simulation/editor mode |
+
